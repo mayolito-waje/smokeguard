@@ -1,2 +1,0 @@
-Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/home/mayo/.espressif/python_env/idf5.5_py3.13_env/bin/python -DESP_PLATFORM=1 -DCCACHE_ENABLE=0 /home/mayo/Documents/projects/csi_research/csi/csi_send
-Project commit: HEAD-HASH-NOTFOUND
