@@ -1,2 +1,47 @@
-.vscode
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/
+
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+managed_components/
+*.o
+*.a
+*.bin
+*.elf
+*.map
+compile_commands.json
+flasher_args.json
+.espressif/
+
+# Node.js
+node_modules/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+dist/
+
+# InfluxDB local data (large, binary)
+influxdb_data/
+influxdb_bin/
+
+# Environment secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prototype data
 prototype/training_data
