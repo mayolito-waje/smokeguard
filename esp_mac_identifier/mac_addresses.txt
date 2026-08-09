@@ -1,0 +1,26 @@
+===========================Tx============================ 
+
+I (278) MAC_ID: ===== ESP32 MAC Address =====
+I (278) MAC_ID: WiFi Station MAC: 14:C1:9F:28:XX:XX
+I (278) MAC_ID: WiFi SoftAP MAC:  14:C1:9F:28:XX:XX
+I (288) MAC_ID: Bluetooth MAC:    14:C1:9F:28:XX:XX
+I (288) MAC_ID: Ethernet MAC:     14:C1:9F:28:XX:XX
+I (298) MAC_ID: ==============================
+
+===========================Rx============================ 
+
+I (278) MAC_ID: ===== ESP32 MAC Address =====
+I (278) MAC_ID: WiFi Station MAC: 14:C1:9F:28:XX:XX
+I (278) MAC_ID: WiFi SoftAP MAC:  14:C1:9F:28:XX:XX
+I (288) MAC_ID: Bluetooth MAC:    14:C1:9F:28:XX:XX
+I (288) MAC_ID: Ethernet MAC:     14:C1:9F:28:XX:XX
+I (298) MAC_ID: ==============================
+
+=========================Bridge==========================
+
+I (278) MAC_ID: ===== ESP32 MAC Address =====
+I (278) MAC_ID: WiFi Station MAC: 14:C1:9F:28:XX:XX
+I (278) MAC_ID: WiFi SoftAP MAC:  14:C1:9F:28:XX:XX
+I (288) MAC_ID: Bluetooth MAC:    14:C1:9F:28:XX:XX
+I (288) MAC_ID: Ethernet MAC:     14:C1:9F:28:XX:XX
+I (298) MAC_ID: ==============================
