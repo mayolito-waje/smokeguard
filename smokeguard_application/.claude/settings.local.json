@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(python3 *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(awk -F, 'NR>1 {print $2}' sample.csv)",
+      "Bash(awk 'NR==1{prev=$1; print \"first:\", $1} {if \\($1==prev\\) dup++} {if \\(\\($1<prev\\) && \\($1 > prev - 100000\\)\\) reset++} {prev=$1} END {print \"lines:\", NR, \"duplicates:\", dup+0, \"resets:\", reset+0, \"last:\", prev}')",
+      "Read(//home/mayo/Documents/projects/csi_research/csi/**)",
+      "Bash(node *)",
+      "Read(//usr/bin/**)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(npx *)",
+      "Bash(./node_modules/.bin/tsc *)",
+      "Bash(echo \"EXIT: $?\")"
+    ]
+  }
+}

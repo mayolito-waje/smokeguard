@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+
+# InfluxDB local data (large, binary)
+influxdb_data/
+influxdb_bin/
+
+# Environment secrets
+.env
+
+# CSV data files
+*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

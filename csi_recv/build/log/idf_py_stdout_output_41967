@@ -1,0 +1,83 @@
+Command: ninja flash
+[1/12] Linking C static library esp-idf/wifi_provisioning/libwifi_provisioning.a
+[2/12] Performing build step for 'bootloader'
+[1/1] cd /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/bootloader/esp-idf/esptool_py && /home/mayo/.espressif/python_env/idf5.5_py3.13_env/bin/python /home/mayo/esp/esp-idf/components/partition_table/check_sizes.py --offset 0xa000 bootloader 0x0 /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/bootloader/bootloader.bin
+Bootloader binary size 0x5170 bytes. 0x4e90 bytes (49%) free.
+[3/12] No install step for 'bootloader'
+[4/12] Completed 'bootloader'
+[5/12] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/app_main.c.obj
+[6/12] Linking C static library esp-idf/main/libmain.a
+[7/12] Generating esp-idf/esp_system/ld/sections.ld
+[8/12] Building C object CMakeFiles/csi_recv.elf.dir/project_elf_src_esp32s3.c.obj
+[9/12] Linking CXX executable csi_recv.elf
+[10/12] Generating binary image from built executable
+esptool.py v4.12.dev1
+Creating esp32s3 image...
+Merged 2 ELF sections
+Successfully created esp32s3 image.
+Generated /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/csi_recv.bin
+[11/12] cd /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/esp-idf/esptool_py && /home/mayo/.espressif/python_env/idf5.5_py3.13_env/bin/python /home/mayo/esp/esp-idf/components/partition_table/check_sizes.py --offset 0xa000 partition --type app /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/partition_table/partition-table.bin /home/mayo/Documents/projects/csi_research/csi/csi_recv/build/csi_recv.bin
+csi_recv.bin binary size 0xb2840 bytes. Smallest app partition is 0x100000 bytes. 0x4d7c0 bytes (30%) free.
+[11/12] cd /home/mayo/esp/esp-idf/components/esptool_py && /home/mayo/.espressif/tools/cmake/3.30.2/bin/cmake -D IDF_PATH=/home/mayo/esp/esp-idf -D "SERIAL_TOOL=/home/mayo/.espressif/python_env/idf5.5_py3.13_env/bin/python;;/home/mayo/esp/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32s3" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/home/mayo/Documents/projects/csi_research/csi/csi_recv/build -P /home/mayo/esp/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 921600 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 2MB 0x0 bootloader/bootloader.bin 0x20000 csi_recv.bin 0xa000 partition_table/partition-table.bin
+esptool.py v4.12.dev1
+Serial port /dev/ttyACM0
+Connecting...
+Chip is ESP32-S3 (QFN56) (revision v0.2)
+Features: WiFi, BLE, Embedded PSRAM 8MB (AP_3v3)
+Crystal is 40MHz
+USB mode: USB-Serial/JTAG
+MAC: 14:c1:9f:28:99:dc
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 921600
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00020000 to 0x000d2fff...
+Flash will be erased from 0x0000a000 to 0x0000afff...
+SHA digest in image updated
+Compressed 20848 bytes to 13352...
+Writing at 0x00000000... (100 %)
+Wrote 20848 bytes (13352 compressed) at 0x00000000 in 0.3 seconds (effective 641.0 kbit/s)...
+Hash of data verified.
+Compressed 731200 bytes to 460102...
+Writing at 0x00020000... (3 %)
+Writing at 0x0002c416... (6 %)
+Writing at 0x00034ea9... (10 %)
+Writing at 0x0003fd83... (13 %)
+Writing at 0x00046104... (17 %)
+Writing at 0x0004c519... (20 %)
+Writing at 0x00052590... (24 %)
+Writing at 0x000584db... (27 %)
+Writing at 0x0005e536... (31 %)
+Writing at 0x00063800... (34 %)
+Writing at 0x0006899b... (37 %)
+Writing at 0x0006daea... (41 %)
+Writing at 0x00073574... (44 %)
+Writing at 0x00078bef... (48 %)
+Writing at 0x0007e224... (51 %)
+Writing at 0x00083e01... (55 %)
+Writing at 0x00089734... (58 %)
+Writing at 0x0008f373... (62 %)
+Writing at 0x00095062... (65 %)
+Writing at 0x0009aa04... (68 %)
+Writing at 0x000a077b... (72 %)
+Writing at 0x000a61f4... (75 %)
+Writing at 0x000ab8c7... (79 %)
+Writing at 0x000b1d8b... (82 %)
+Writing at 0x000ba103... (86 %)
+Writing at 0x000bffe3... (89 %)
+Writing at 0x000c6294... (93 %)
+Writing at 0x000cc472... (96 %)
+Writing at 0x000d1f80... (100 %)
+Wrote 731200 bytes (460102 compressed) at 0x00020000 in 4.6 seconds (effective 1280.4 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 105...
+Writing at 0x0000a000... (100 %)
+Wrote 3072 bytes (105 compressed) at 0x0000a000 in 0.0 seconds (effective 778.3 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...

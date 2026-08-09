@@ -1,0 +1,16 @@
+[project]
+name = "csi_parser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pyqt5>=5.15.11",
+    "pyqtgraph>=0.14.0",
+    "pyserial>=3.5",
+    "scipy>=1.17.1",
+    "statsmodels>=0.14.6",
+]
