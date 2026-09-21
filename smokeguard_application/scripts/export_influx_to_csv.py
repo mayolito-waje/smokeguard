@@ -3,7 +3,7 @@
 
 The output matches the ESP32 receiver's CSV layout (26 columns, same order as
 sample_csv_output/sample.csv), so it can be studied directly or fed back into
-the backend in replay mode (SERIAL_PORT=./export.csv).
+the backend in replay mode (REPLAY_CSV=./export.csv).
 
 Not stored in InfluxDB (reconstructed as constants):
   - type           -> "CSI_DATA"
@@ -145,7 +145,7 @@ def main() -> int:
                 break
 
     print(f"Exported {rows} rows to {args.out}")
-    print("Replay it with: SERIAL_PORT=./{} uv run uvicorn app.main:app --port 8000".format(args.out))
+    print("Replay it with: REPLAY_CSV=./{} uv run uvicorn app.main:app --port 8000".format(args.out))
     return 0
 
 

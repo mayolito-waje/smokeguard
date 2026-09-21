@@ -4,10 +4,10 @@ Uses the official influxdb-client Python library with batched writes.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from influxdb_client import InfluxDBClient as _InfluxDBClient
-from influxdb_client.client.write_api import SYNCHRONOUS, WriteOptions
+from influxdb_client.client.write_api import WriteOptions
 from influxdb_client.client.write.point import Point
 from influxdb_client.rest import ApiException
 
@@ -171,6 +171,39 @@ class InfluxClient:
         point.time(ts_ns)
 
         return point
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def delete_older_than(self, days: int) -> bool:
+        """Permanently delete readings older than `days` days from the bucket.
+
+        Only CSI readings are removed (predicate on `_measurement`), leaving
+        any other measurement in the bucket untouched. Export CSVs before the
+        retention window expires — deleted points cannot be recovered.
+        Returns True on success.
+        """
+        if not self._connected or not self._client:
+            return False
+
+        stop = datetime.now(timezone.utc) - timedelta(days=days)
+        start = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        try:
+            self._client.delete_api().delete(
+                start=start,
+                stop=stop,
+                predicate='_measurement="csi_reading"',
+                bucket=self.settings.influxdb_bucket,
+                org=self.settings.influxdb_org,
+            )
+        except Exception as exc:
+            logger.error("InfluxDB cleanup failed (delete < %s): %s", stop, exc)
+            return False
+
+        logger.info("Deleted CSI readings older than %s (%d-day retention)",
+                    stop.isoformat(), days)
+        return True
 
     # ------------------------------------------------------------------
     # Queries

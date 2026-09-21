@@ -22,12 +22,12 @@ async def websocket_endpoint(
     """WebSocket endpoint for live CSI data streaming.
 
     On connect, sends a welcome message with subcarrier metadata.
-    Then streams each new CSI reading as it arrives from the serial reader,
+    Then streams each new CSI reading as it arrives from the MQTT reader,
     plus periodic status updates.
     """
     manager: ConnectionManager = websocket.app.state.ws_manager  # type: ignore[attr-defined]
     num_subcarriers: int = websocket.app.state.num_subcarriers  # type: ignore[attr-defined]
-    serial_status = websocket.app.state.serial_status  # type: ignore[attr-defined]
+    mqtt_status = websocket.app.state.mqtt_status  # type: ignore[attr-defined]
     started_at = time.time()
 
     await manager.connect(websocket)
@@ -40,15 +40,17 @@ async def websocket_endpoint(
         ).model_dump()
     ))
 
-    # Send current serial status
-    status_snapshot = serial_status.snapshot()
+    # Send current MQTT status
+    status_snapshot = mqtt_status.snapshot()
     await websocket.send_text(json.dumps(
         WSStatus(
-            serial="connected" if status_snapshot["connected"] else "disconnected",
+            mqtt=mqtt_status.transport_state(),
             packets=status_snapshot["packets"],
             dropped_lines=status_snapshot["dropped_lines"],
             last_record_at=status_snapshot["last_record_at"],
             error=status_snapshot["error"],
+            receiver_online=status_snapshot["receiver_online"],
+            ntp_synced=status_snapshot["ntp_synced"],
         ).model_dump()
     ))
 

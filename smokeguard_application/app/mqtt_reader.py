@@ -1,15 +1,20 @@
-"""Background serial reader for ESP32 CSI data.
+"""Background MQTT reader for ESP32 CSI data.
 
-Reads CSI CSV lines from the ESP32 receiver over serial (or replays a CSV
-file for development), parses each line, and pushes CSIRecord instances onto
-an asyncio.Queue for consumption by the main event loop.
+Subscribes to the CSI data topic published by the csi_recv_mqtt firmware
+(or replays a CSV file for development), parses each payload, and pushes
+CSIRecord instances onto an asyncio.Queue for consumption by the main event
+loop.
 
 Key features:
-- Detects format variant (ESP32-S3 vs C5/C6) by field count
-- Computes real UNIX timestamps from the ESP32's microsecond counter
-- Handles 32-bit microsecond counter wraparound (~71.6 minutes)
-- Graceful reconnection on serial errors (exponential backoff)
-- Replay mode: reads from a .csv file when serial_port ends with .csv
+- paho-mqtt network thread replaces the old serial thread; on_message runs
+  off the event loop and pushes records via call_soon_threadsafe
+- The firmware NTP-stamps the trailing timestamp_real column; before its
+  first sync it sends 0.000000, so the backend falls back to receive-time
+  estimation from the ESP32's microsecond counter (incl. 32-bit wraparound)
+- Also subscribes to the status topic to track receiver online / NTP-sync
+  state (single-receiver setup assumed — later heartbeats overwrite)
+- Auto-reconnect via paho's built-in exponential backoff
+- Replay mode: reads from a .csv file when replay_csv is set
 """
 
 import asyncio
@@ -17,27 +22,24 @@ import csv
 import json
 import logging
 import os
-import queue
 import time
 from io import StringIO
 from threading import Event, Lock, Thread
-import serial
+
+import paho.mqtt.client as mqtt
 
 from app.config import Settings
 from app.models import CSIRecord, DATA_COLUMNS_C5C6, DATA_COLUMNS_S3
 
 logger = logging.getLogger(__name__)
 
-# Maximum time (seconds) between reconnection attempts
-MAX_RECONNECT_DELAY = 10.0
-
 # CSV file replay throttle (seconds between lines; 0 = no throttle)
 # Set to 0.01 for ~100 Hz (realistic hardware rate), 0 for max speed
 REPLAY_THROTTLE = 0.005  # 200 Hz — fast but allows consumer to keep up
 
 
-class SerialStatus:
-    """Thread-safe snapshot of the serial reader state."""
+class MqttStatus:
+    """Thread-safe snapshot of the MQTT reader state."""
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -47,6 +49,12 @@ class SerialStatus:
         self.reconnect_attempts: int = 0
         self.last_record_at: float | None = None
         self.error: str | None = None
+        # Receiver state learned from the status topic (may stay None until
+        # the first status message arrives)
+        self.receiver_online: bool | None = None
+        self.ntp_synced: bool | None = None
+        self.receiver_client: str | None = None
+        self.last_status_at: float | None = None
 
     def snapshot(self) -> dict:
         """Return a dict copy of the current status (thread-safe)."""
@@ -58,6 +66,10 @@ class SerialStatus:
                 "reconnect_attempts": self.reconnect_attempts,
                 "last_record_at": self.last_record_at,
                 "error": self.error,
+                "receiver_online": self.receiver_online,
+                "ntp_synced": self.ntp_synced,
+                "receiver_client": self.receiver_client,
+                "last_status_at": self.last_status_at,
             }
 
     def update(self, **kwargs: object) -> None:
@@ -67,12 +79,22 @@ class SerialStatus:
                 if hasattr(self, key):
                     setattr(self, key, value)
 
+    def transport_state(self) -> str:
+        """Map the connection state to the WSStatus/API 3-state enum."""
+        with self._lock:
+            if self.connected:
+                return "connected"
+            if self.error is not None:
+                return "reconnecting"
+            return "disconnected"
 
-class CSISerialReader:
-    """Reads CSI CSV lines from a serial port (or CSV file) in a daemon thread.
+
+class CsiMqttReader:
+    """Subscribes to CSI data over MQTT (or replays a CSV file).
 
     Parsed CSIRecord objects are pushed onto an asyncio.Queue via
-    call_soon_threadsafe, keeping the serial I/O thread free of async concerns.
+    call_soon_threadsafe, keeping the paho network thread free of async
+    concerns — the same pattern the old serial thread used.
     """
 
     def __init__(
@@ -86,117 +108,172 @@ class CSISerialReader:
         self._loop = loop
         self._stop_event = Event()
         self._thread: Thread | None = None
-        self.status = SerialStatus()
+        self._client: mqtt.Client | None = None
+        self._stopping = False
+        self.status = MqttStatus()
 
-        # Timestamp tracking (reset on each reconnect)
+        # Timestamp tracking (reset on each reconnect, used only as a
+        # fallback when the firmware's NTP-stamped timestamp is invalid)
         self._unix_start_time: float = 0.0
         self._offset_time: int | None = None
         self._prev_local_ts: int | None = None
         self._ts_overflow: int = 0
 
-        # Determine if we're in replay mode (CSV file instead of serial)
-        self._replay_mode = settings.serial_port.endswith(".csv")
+        # Replay mode is selected by the replay_csv setting (empty = live MQTT)
+        self._replay_mode = bool(settings.replay_csv)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn the background reader thread."""
-        if self._thread and self._thread.is_alive():
-            logger.warning("Serial reader thread already running")
+        """Spawn the replay thread, or start the paho network thread."""
+        if self._replay_mode:
+            if self._thread and self._thread.is_alive():
+                logger.warning("Replay thread already running")
+                return
+
+            self._stop_event.clear()
+            self._thread = Thread(target=self._run_replay, daemon=True, name="csi-replay")
+            self._thread.start()
+            logger.info("Replay started (csv: %s)", self.settings.replay_csv)
             return
 
-        self._stop_event.clear()
-        self._thread = Thread(target=self._run, daemon=True, name="csi-serial")
-        self._thread.start()
-        mode = "replay" if self._replay_mode else "serial"
-        logger.info("Serial reader started (mode: %s)", mode)
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=self.settings.mqtt_client_id,
+        )
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
+        if self.settings.mqtt_username:
+            # Only set creds when a username is configured — an empty string
+            # would be sent to the broker as a literal username
+            client.username_pw_set(
+                self.settings.mqtt_username, self.settings.mqtt_password
+            )
+        # paho reconnects on its own with exponential backoff (1s → 30s)
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        client.connect_async(self.settings.mqtt_host, self.settings.mqtt_port, keepalive=30)
+        client.loop_start()
+        self._client = client
+        logger.info(
+            "MQTT reader started (broker %s:%d, topics: %s, %s)",
+            self.settings.mqtt_host, self.settings.mqtt_port,
+            self.settings.mqtt_topic_data, self.settings.mqtt_topic_status,
+        )
 
     def stop(self) -> None:
-        """Signal the reader thread to stop and wait for it."""
+        """Stop the reader thread and disconnect from the broker."""
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
-            if self._thread.is_alive():
-                logger.warning("Serial reader thread did not stop within timeout")
 
-    # ------------------------------------------------------------------
-    # Thread main loop
-    # ------------------------------------------------------------------
-
-    def _run(self) -> None:
-        """Main thread loop: connect → stream → reconnect."""
         if self._replay_mode:
-            self._run_replay()
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=3.0)
+                if self._thread.is_alive():
+                    logger.warning("Replay thread did not stop within timeout")
             return
 
-        backoff = 1.0
-        while not self._stop_event.is_set():
-            try:
-                self._stream_serial()
-                backoff = 1.0  # Reset backoff on clean exit
-            except (serial.SerialException, OSError) as exc:
-                self.status.update(
-                    connected=False,
-                    error=str(exc),
-                    reconnect_attempts=self.status.reconnect_attempts + 1,
-                )
-                logger.warning(
-                    "Serial error: %s — reconnecting in %.1fs",
-                    exc, backoff,
-                )
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
-            except Exception:
-                logger.exception("Unexpected error in serial reader")
-                self._stop_event.wait(5.0)
+        client = self._client
+        if client is None:
+            return
 
-    # ------------------------------------------------------------------
-    # Serial streaming
-    # ------------------------------------------------------------------
-
-    def _stream_serial(self) -> None:
-        """Open serial port and process lines until error or stop."""
-        ser = serial.Serial(
-            port=self.settings.serial_port,
-            baudrate=self.settings.serial_baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=1.0,
-        )
-        logger.info("Serial port %s opened at %d baud",
-                     self.settings.serial_port, self.settings.serial_baudrate)
-
-        # Flush any stale data in the buffer
-        ser.reset_input_buffer()
-
-        # Reset timestamp state for this connection
-        self._reset_timestamps()
-
-        self.status.update(connected=True, error=None, reconnect_attempts=0)
-
+        # Mark the stop so _on_disconnect doesn't record the clean drop as
+        # an error (paho fires it with "Normal disconnection" here)
+        self._stopping = True
+        self.status.update(connected=False)
         try:
-            while not self._stop_event.is_set():
-                raw = ser.readline()
-                if not raw:
-                    continue
+            client.disconnect()  # Returns MQTT_ERR_NO_CONN if not connected
+        except Exception:
+            logger.debug("MQTT disconnect raised", exc_info=True)
+        try:
+            client.loop_stop()  # Joins the network thread
+        except Exception:
+            logger.debug("MQTT loop_stop raised", exc_info=True)
+        logger.info("MQTT reader stopped")
 
-                try:
-                    line = raw.decode("utf-8", errors="replace").strip()
-                except UnicodeDecodeError:
-                    self.status.update(dropped_lines=self.status.dropped_lines + 1)
-                    continue
+    # ------------------------------------------------------------------
+    # paho callbacks (run on the paho network thread)
+    # ------------------------------------------------------------------
 
-                if not line:
-                    continue
+    def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
+        """Subscribe to the CSI topics once connected to the broker."""
+        if reason_code.is_failure:
+            self.status.update(
+                connected=False,
+                error=f"MQTT connect failed: {reason_code}",
+                reconnect_attempts=self.status.reconnect_attempts + 1,
+            )
+            logger.warning("MQTT connect failed: %s", reason_code)
+            return
 
-                self._process_line(line)
-        finally:
-            ser.close()
+        client.subscribe([
+            (self.settings.mqtt_topic_data, 0),    # CSI is loss-tolerant
+            (self.settings.mqtt_topic_status, 1),  # status is retained/low-rate
+        ])
+        self._reset_timestamps()
+        self.status.update(connected=True, error=None, reconnect_attempts=0)
+        logger.info("Connected to MQTT broker, subscribed to CSI topics")
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
+        """Record the drop; paho's network thread keeps retrying on its own."""
+        if self._stopping or reason_code is None:
+            # Client-initiated disconnect (stop()) — nothing to report
             self.status.update(connected=False)
-            logger.info("Serial port closed")
+            return
+        self.status.update(
+            connected=False,
+            error=f"MQTT disconnected: {reason_code}",
+            reconnect_attempts=self.status.reconnect_attempts + 1,
+        )
+        logger.warning("MQTT disconnected: %s", reason_code)
+
+    def _on_message(self, client, userdata, msg) -> None:
+        """Dispatch a message by topic: CSI data or receiver status.
+
+        The dispatch is wrapped so a malformed payload can never raise out
+        of this callback — an uncaught exception here would kill paho's
+        network thread and leave the reader permanently deaf.
+        """
+        try:
+            if msg.topic == self.settings.mqtt_topic_data:
+                # The data topic is QoS 0; skip retained messages as a cheap
+                # guard against stale-line replays
+                if msg.retain:
+                    return
+                line = msg.payload.decode("utf-8", errors="replace").strip()
+                if line:
+                    self._process_line(line)
+            elif msg.topic == self.settings.mqtt_topic_status:
+                self._handle_status_payload(msg.payload)
+        except Exception:
+            logger.exception("Error handling MQTT message on topic %s", msg.topic)
+            self.status.update(dropped_lines=self.status.dropped_lines + 1)
+
+    def _handle_status_payload(self, payload) -> None:
+        """Parse a receiver status JSON message and update the status."""
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        if not isinstance(data, dict) or "state" not in data:
+            return
+
+        if data["state"] == "online":
+            self.status.update(
+                receiver_online=True,
+                ntp_synced=bool(data.get("ntp_synced")),
+                receiver_client=data.get("client"),
+                last_status_at=time.time(),
+            )
+        elif data["state"] == "offline":
+            # LWT message: the receiver died. Leave the other fields alone —
+            # an offline LWT carries no ntp_synced/channel/etc.
+            self.status.update(
+                receiver_online=False,
+                last_status_at=time.time(),
+            )
 
     # ------------------------------------------------------------------
     # CSV replay mode
@@ -204,7 +281,7 @@ class CSISerialReader:
 
     def _run_replay(self) -> None:
         """Replay CSI data from a CSV file (for development without hardware)."""
-        csv_path = self.settings.serial_port
+        csv_path = self.settings.replay_csv
         if not os.path.isfile(csv_path):
             logger.error("Replay CSV not found: %s", csv_path)
             self.status.update(error=f"CSV not found: {csv_path}")
@@ -254,7 +331,9 @@ class CSISerialReader:
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
 
-        self._process_row(row, has_ts_real=False)
+        # MQTT payloads always carry the firmware-stamped timestamp_real
+        # column; the fallback inside covers the pre-NTP-sync window
+        self._process_row(row, has_ts_real=True)
 
     def _process_row(
         self, row: list[str], has_ts_real: bool = False
@@ -264,7 +343,7 @@ class CSISerialReader:
         Args:
             row: List of CSV field strings (already split by csv.reader).
             has_ts_real: If True, the row has timestamp_real appended as the
-                last column (from CSV replay with pre-computed timestamps).
+                last column (stamped by the firmware via NTP).
         """
         # Detect format by field count
         num_fields = len(row)
@@ -291,6 +370,10 @@ class CSISerialReader:
         except (json.JSONDecodeError, IndexError):
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
+        if not isinstance(raw_data, list):
+            logger.debug("Data field is not a JSON array, skipping")
+            self.status.update(dropped_lines=self.status.dropped_lines + 1)
+            return
 
         csi_len = int(fields["len"])
         if len(raw_data) != csi_len:
@@ -301,10 +384,14 @@ class CSISerialReader:
 
         # Compute timestamp_real
         if has_ts_real and num_fields == len(columns) + 1:
-            # Use the pre-computed timestamp_real from the CSV
+            # Use the firmware's NTP-stamped timestamp_real
             try:
                 timestamp_real = float(row[-1])
             except (ValueError, IndexError):
+                timestamp_real = self._compute_timestamp(fields)
+            if timestamp_real <= 0.0:
+                # The ESP32 sends 0.000000 until its first NTP sync —
+                # fall back to receive-time estimation
                 timestamp_real = self._compute_timestamp(fields)
         else:
             timestamp_real = self._compute_timestamp(fields)
@@ -359,16 +446,18 @@ class CSISerialReader:
         )
 
     # ------------------------------------------------------------------
-    # Timestamp computation
+    # Timestamp computation (fallback only)
     # ------------------------------------------------------------------
 
     def _compute_timestamp(self, fields: dict) -> float:
-        """Compute a real UNIX timestamp from the ESP32's microsecond counter.
+        """Estimate a UNIX timestamp from the ESP32's microsecond counter.
 
-        On the first packet of a session (or after reconnect), the current
-        wall-clock time is recorded as UNIX_START_TIME and the ESP32's
-        microsecond counter value is stored as OFFSET_TIME. Subsequent
-        timestamps are computed relative to these baselines.
+        Used only when the firmware-stamped timestamp_real is missing or
+        invalid (pre-NTP-sync). On the first packet of a session (or after
+        reconnect), the current wall-clock time is recorded as
+        UNIX_START_TIME and the ESP32's microsecond counter value is stored
+        as OFFSET_TIME. Subsequent timestamps are computed relative to
+        these baselines.
 
         The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes.
         We detect wraparound (new value < previous by more than 2^31) and
@@ -408,6 +497,9 @@ class CSISerialReader:
                 self._queue.put_nowait(record)
             except (asyncio.QueueFull, asyncio.QueueEmpty):
                 pass
+        except RuntimeError:
+            # Event loop already closed during shutdown — drop the record
+            pass
 
     def _reset_timestamps(self) -> None:
         """Reset timestamp tracking state (called on each new connection)."""

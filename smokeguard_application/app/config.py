@@ -11,9 +11,19 @@ class Settings(BaseSettings):
     All values can be set via environment variables or a .env file.
     """
 
-    # Serial port configuration
-    serial_port: str = "/dev/ttyUSB0"
-    serial_baudrate: int = 921600
+    # MQTT broker configuration (Mosquitto on this machine; the ESP32
+    # receiver publishes CSI lines to the data topic)
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = 1883
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    mqtt_topic_data: str = "home/csi/data"
+    mqtt_topic_status: str = "home/csi/status"
+    mqtt_client_id: str = "smokeguard-backend"
+
+    # CSV replay mode (development without hardware): set to a .csv path to
+    # replay recorded CSI data instead of subscribing to MQTT
+    replay_csv: str = ""
 
     # Optional MAC filter (leave empty to accept all senders)
     sender_mac: str = ""
@@ -26,6 +36,11 @@ class Settings(BaseSettings):
 
     # InfluxDB local data directory (for the subprocess)
     influxdb_data_dir: str = "./influxdb_data"
+
+    # Periodic cleanup — CSI data grows fast; readings older than this many
+    # days are deleted from InfluxDB (export CSVs first: scripts/export_influx_to_csv.py)
+    csi_retention_days: int = 7
+    cleanup_interval_hours: float = 0.5  # 30 minutes
 
     # Server
     host: str = "0.0.0.0"
