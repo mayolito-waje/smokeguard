@@ -1,0 +1,35 @@
+# Build-time configuration for the CSI receiver. These are applied when
+# sdkconfig is generated -- `idf.py set-target esp32s3`, or after deleting
+# sdkconfig. sdkconfig itself is gitignored, so this file is the durable copy.
+#
+# The first entry is load-bearing; the other two are carried over from
+# csi_recv/sdkconfig.defaults to keep the capture path configured the way that
+# example was tuned. What was deliberately NOT copied from there and why is
+# noted at the bottom.
+
+# Wi-Fi CSI is a compile-time feature (Kconfig default is n). Without it
+# esp_wifi_set_csi_config() fails with ESP_FAIL at runtime, which aborts in
+# wifi_csi_init() -- the firmware boots and associates fine, then reboots.
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# Promiscuous/CSI mode hands the driver every frame it hears, not just the
+# ones addressed to us, so the default 32 buffers is not enough to keep up.
+# 128 is the maximum without LWIP_WND_SCALE. These are allocated on demand and
+# sized to the frame, so this is a cap on in-flight buffers rather than a
+# fixed 128 x 1600 bytes of RAM.
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=128
+
+# Matches csi_recv. The reference does not say whether it wanted this for CSI
+# or for ESP-NOW timing, so it is kept for parity with the known-good capture
+# setup. The only traffic this firmware sends is MQTT, whose messages are far
+# too small to have been aggregated anyway.
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
+# Left out of csi_recv/sdkconfig.defaults on purpose:
+#   CONFIG_PARTITION_TABLE_OFFSET=0xa000  -- a flash layout change, unrelated
+#       to CSI, and this project already has a working table at the default.
+#   CONFIG_ESP_CONSOLE_UART_*             -- would change the monitor's port
+#       and baud rate, breaking the `idf.py monitor` setup already in use.
+#   CONFIG_ESP_TASK_WDT_TIMEOUT_S=30      -- the CSI path here is decoupled
+#       from publishing through a queue, so the default watchdog is fine. Add
+#       it if watchdog resets ever appear.

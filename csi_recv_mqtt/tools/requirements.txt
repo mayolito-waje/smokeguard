@@ -1,0 +1,2 @@
+# For tools/mqtt_subscribe.py
+paho-mqtt>=2.0,<3
