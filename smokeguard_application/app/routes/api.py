@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.config import get_settings
 from app.models import (
+    CleanupResponse,
     ErrorResponse,
     HealthResponse,
     HistoryPoint,
@@ -16,7 +18,7 @@ from app.models import (
     WSCsiData,
     WSStatus,
 )
-from app.serial_reader import SerialStatus
+from app.mqtt_reader import MqttStatus
 
 if TYPE_CHECKING:
     from app.influxdb_client import InfluxClient
@@ -42,8 +44,8 @@ def _get_ws_manager(request: Request) -> "ConnectionManager":
     return request.app.state.ws_manager  # type: ignore[attr-defined]
 
 
-def _get_serial_status(request: Request) -> SerialStatus:
-    return request.app.state.serial_status  # type: ignore[attr-defined]
+def _get_mqtt_status(request: Request) -> MqttStatus:
+    return request.app.state.mqtt_status  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------
@@ -52,14 +54,14 @@ def _get_serial_status(request: Request) -> SerialStatus:
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check(request: Request) -> HealthResponse:
-    """Liveness check: reports serial and InfluxDB connectivity."""
-    serial = _get_serial_status(request).snapshot()
+    """Liveness check: reports MQTT and InfluxDB connectivity."""
+    mqtt_status = _get_mqtt_status(request).snapshot()
     influx_client = _get_influx(request)
     return HealthResponse(
         status="ok",
-        serial_connected=serial["connected"],
-        packets_received=serial["packets"],
-        dropped_lines=serial["dropped_lines"],
+        mqtt_connected=mqtt_status["connected"],
+        packets_received=mqtt_status["packets"],
+        dropped_lines=mqtt_status["dropped_lines"],
         influxdb_connected=influx_client.connected,
     )
 
@@ -71,15 +73,17 @@ async def health_check(request: Request) -> HealthResponse:
 @router.get("/status", response_model=StatusResponse)
 async def get_status(request: Request) -> StatusResponse:
     """Detailed live status of the CSI data pipeline."""
-    serial = _get_serial_status(request).snapshot()
+    mqtt_status = _get_mqtt_status(request).snapshot()
     influx_client = _get_influx(request)
     ws_manager = _get_ws_manager(request)
     return StatusResponse(
-        serial_connected=serial["connected"],
-        packets_received=serial["packets"],
-        dropped_lines=serial["dropped_lines"],
-        last_record_at=serial["last_record_at"],
-        reconnect_attempts=serial["reconnect_attempts"],
+        mqtt_connected=mqtt_status["connected"],
+        packets_received=mqtt_status["packets"],
+        dropped_lines=mqtt_status["dropped_lines"],
+        last_record_at=mqtt_status["last_record_at"],
+        reconnect_attempts=mqtt_status["reconnect_attempts"],
+        receiver_online=mqtt_status["receiver_online"],
+        ntp_synced=mqtt_status["ntp_synced"],
         influxdb_connected=influx_client.connected,
         websocket_clients=ws_manager.client_count,
         uptime_seconds=time.time() - SERVER_START_TIME,
@@ -142,3 +146,28 @@ async def get_readings_range(
 
     points = influx_client.query_range(start=start_dt, stop=stop_dt, limit=limit)
     return HistoryResponse(count=len(points), points=points)
+
+
+# ------------------------------------------------------------------
+# Manual retention cleanup
+# ------------------------------------------------------------------
+
+@router.get(
+    "/cleanup",
+    response_model=CleanupResponse,
+    responses={503: {"model": ErrorResponse}},
+)
+async def cleanup_now(request: Request) -> CleanupResponse:
+    """Delete readings older than the retention window now (manual trigger).
+
+    The periodic task runs this on its own schedule; use this endpoint to
+    trigger it immediately, e.g. right after a CSV export.
+    """
+    influx_client = _get_influx(request)
+    if not influx_client.connected:
+        raise HTTPException(status_code=503, detail="InfluxDB not available")
+
+    days = get_settings().csi_retention_days
+    if not influx_client.delete_older_than(days):
+        raise HTTPException(status_code=503, detail="InfluxDB cleanup failed")
+    return CleanupResponse(retention_days=days)

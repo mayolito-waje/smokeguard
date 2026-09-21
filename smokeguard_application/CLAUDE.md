@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 SmokeGuard is a Wi-Fi CSI (Channel State Information) based smoke detection research system. The workspace root (`smokeguard_application/`) is a FastAPI backend that ingests CSI data, stores it in a local InfluxDB, and streams to a React frontend via WebSocket. It is part of a larger multi-component project under `csi_research/csi/`:
 
 - `csi_send/` — ESP32-S3 transmitter firmware (ESP-IDF C). Sends ESP-NOW packets at 100 Hz on Wi-Fi channel 11 (HT40).
-- `csi_recv/` — ESP32-S3 receiver firmware (ESP-IDF C). Captures CSI data, applies gain compensation, streams CSV over serial (921600 baud).
+- `csi_recv/` — ESP32-S3 receiver firmware (ESP-IDF C). Captures CSI data, applies gain compensation, streams CSV over serial (921600 baud). Pristine reference — do not edit.
+- `csi_send_mqtt/`, `csi_recv_mqtt/` — MQTT variants of the above. The receiver joins the hotspot, NTP-syncs its wall clock, stamps the trailing `timestamp_real` CSV column, and publishes each CSI line to `home/csi/data` (plus JSON status to `home/csi/status`) on the Mosquitto broker. **These are the active firmware projects** — edits go here, not in the pristine `csi_send`/`csi_recv` projects.
 - `esp_mac_identifier/` — Simple ESP32-S3 firmware to read and log MAC addresses of each device.
 - `prototype/csi_parser/` — Python prototype for serial capture (`read_csi.py`) and real-time visualization (`csi_visualize.py`) using PyQt5 + pyqtgraph.
 - `smokeguard_application/` — (this directory) FastAPI backend + InfluxDB + WebSocket streaming.
@@ -22,11 +23,11 @@ uv sync
 bash scripts/start_influxdb.sh
 bash scripts/setup_influxdb.sh   # first time only — creates org, bucket, token → .env
 
-# Run with real hardware
+# Run with real hardware (Mosquitto broker + csi_recv_mqtt publishing)
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run in replay mode (no hardware — replays sample CSV)
-SERIAL_PORT=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+REPLAY_CSV=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 InfluxDB v2.7.10 binary is at `influxdb_bin/influxd`. Data is stored in `./influxdb_data/` (gitignored). The bucket is `csi_data` in org `smokeguard` with 30-day retention.
@@ -36,12 +37,13 @@ InfluxDB v2.7.10 binary is at `influxdb_bin/influxd`. Data is stored in `./influ
 ### Data flow
 
 ```
-ESP32 Rx serial (or CSV replay)
-        │
-        ▼
+ESP32 Rx (csi_recv_mqtt) --MQTT--> Mosquitto broker (this laptop)
+        │                              home/csi/data (CSV lines, QoS 0)
+        │                              home/csi/status (JSON, QoS 1 retained)
+        ▼                              (or CSV replay)
 ┌──────────────────┐
-│  SerialReader     │  daemon thread
-│  (serial_reader)  │  parses CSI_DATA CSV lines → CSIRecord
+│  CsiMqttReader   │  paho network thread
+│  (mqtt_reader)   │  parses CSI_DATA CSV payloads → CSIRecord
 └──────┬───────────┘
        │ call_soon_threadsafe
        ▼
@@ -59,23 +61,25 @@ ESP32 Rx serial (or CSV replay)
 ```
 
 Key design decisions:
-- The serial thread never touches I/O outside of serial reading — it pushes parsed `CSIRecord` objects onto the async queue via `call_soon_threadsafe`.
+- The paho network thread never touches I/O outside of MQTT — it pushes parsed `CSIRecord` objects onto the async queue via `call_soon_threadsafe`.
+- Reconnects are paho's job: `reconnect_delay_set(1, 30)` gives exponential backoff, and subscriptions are re-established in `on_connect`.
 - A single consumer task drains the queue and fans out to InfluxDB + WebSocket.
 - WebSocket broadcast uses pre-serialized JSON (one `json.dumps` per message, not per client).
 - Per-client bounded queues drop oldest messages when full — slow clients never stall the 100 Hz pipeline.
 - InfluxDB writes use the official client's background batching thread (`batch_size=500`, `flush_interval=1000ms`).
+- A periodic cleanup task (`cleanup_old_readings` in `main.py`) deletes readings older than `csi_retention_days` (default 7 days) via InfluxDB's delete API — first run 60 s after startup, then every `cleanup_interval_hours` (default 0.5 h = 30 min). Export CSVs (`scripts/export_influx_to_csv.py`) before the window expires; deleted points are unrecoverable.
 
-### CSI parsing (`app/serial_reader.py`)
+### CSI parsing (`app/mqtt_reader.py`)
 
 Two input modes:
-- **Serial mode** (default): opens `/dev/ttyUSB0` at 921600 8N1, reads `\r\n`-terminated lines, filters for `CSI_DATA` prefix (ignores ESP-IDF log noise).
-- **Replay mode**: when `SERIAL_PORT` ends with `.csv`, reads the CSV file directly. Pre-parsed rows are passed to `_process_row()` to avoid re-splitting the quoted JSON `data` column.
+- **MQTT mode** (default): subscribes to `home/csi/data` (QoS 0) and `home/csi/status` (QoS 1). Each data payload is one CSV line; retained data messages are skipped. Status JSON updates `receiver_online` / `ntp_synced` (the retained LWT `{"state":"offline"}` marks the receiver dead).
+- **Replay mode**: when `REPLAY_CSV` is set to a `.csv` path, reads the CSV file directly. Pre-parsed rows are passed to `_process_row()` to avoid re-splitting the quoted JSON `data` column.
 
 Two format variants detected by field count:
 - **ESP32-S3** (25/26 columns): `local_timestamp` at index 18, `data` at index 24 (or -2 with `timestamp_real` appended).
 - **ESP32-C5/C6** (14/15 columns): `local_timestamp` at index 9, `data` at index 13 (or -2).
 
-Timestamp computation: `UNIX_START_TIME + (local_timestamp - OFFSET_TIME) / 1_000_000.0`, where the baseline is captured on the first valid row of each connection. The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes — `_compute_timestamp` detects wraparound and accumulates overflow.
+Timestamp handling: the firmware NTP-stamps the trailing `timestamp_real` column (UNIX epoch seconds with microseconds). Until its first NTP sync it sends `0.000000`, so the backend falls back to `UNIX_START_TIME + (local_timestamp - OFFSET_TIME) / 1_000_000.0`, where the baseline is captured on the first valid row of each connection. The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes — `_compute_timestamp` detects wraparound and accumulates overflow.
 
 Subcarrier layout for 128 I/Q values (64 subcarriers): guard band (pairs 0–5), lower data (6–31), DC null (32), upper data (33–58), guard band (59–63).
 
@@ -100,7 +104,8 @@ Server → client at `GET /ws`:
  "i": [0,0,10,9,...], "q": [0,0,3,3,...],
  "metadata": {"data_start_idx": 6, "data_end_idx": 31, "dc_null_idx": 32, ...,
               "subcarrier_index_offset": 32}}
-{"type": "status", "serial": "connected", "packets": 5000, "dropped_lines": 0, ...}
+{"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
+ "receiver_online": true, "ntp_synced": true, ...}
 {"type": "pong"}
 ```
 
@@ -112,10 +117,11 @@ Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/health` | `{status, serial_connected, packets_received, dropped_lines, influxdb_connected}` |
-| `GET /api/status` | Detailed status with uptime, reconnect attempts, WS client count |
+| `GET /api/health` | `{status, mqtt_connected, packets_received, dropped_lines, influxdb_connected}` |
+| `GET /api/status` | Detailed status with uptime, reconnect attempts, receiver online / NTP-sync state, WS client count |
 | `GET /api/readings/latest?limit=N` | N most recent readings (default 10, max 500) |
 | `GET /api/readings?start=<ISO>&stop=<ISO>&limit=N` | Time-range query (start required, max 10000) |
+| `GET /api/cleanup` | Manually trigger retention cleanup (deletes readings older than `csi_retention_days`, default 7) |
 
 ## ESP-IDF Build System (sibling components)
 
@@ -123,7 +129,7 @@ ESP-IDF v5.5.3 at `~/.espressif/v5.5.3/esp-idf`. All C components target ESP32-S
 
 ```bash
 . ~/.espressif/v5.5.3/esp-idf/export.sh
-cd ../csi_recv && idf.py build          # or: csi_send, esp_mac_identifier
+cd ../csi_recv_mqtt && idf.py build    # or: csi_send_mqtt, esp_mac_identifier
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
@@ -133,13 +139,14 @@ idf.py -p /dev/ttyUSB0 flash monitor
 [ESP32-S3 "Tx"] --ESP-NOW (ch 11, HT40, MCS0, 100 Hz)--> [ESP32-S3 "Rx"]
   14:C1:9F:28:C1:A0                                        14:C1:9F:28:99:DC
                                                                   |
-                                                            Serial 921600 8N1
+                                                   Wi-Fi (hotspot) → Mosquitto
+                                                       home/csi/data|status
                                                                   |
                                                                   v
                                                          This application
 ```
 
-Bridge MAC: `14:C1:9F:28:88:E8`. The receiver filters CSI packets by sender MAC (`CONFIG_CSI_SEND_MAC` in `csi_recv/main/app_main.c`).
+Bridge MAC: `14:C1:9F:28:88:E8`. The receiver filters CSI packets by sender MAC (`CFG_CSI_SENDER_MAC` in `csi_recv_mqtt/main/.env`).
 
 ## CSI Data Format
 
@@ -148,7 +155,7 @@ ESP32-S3 CSV columns:
 
 - `data`: JSON array of interleaved I/Q integers — `[I1, Q1, I2, Q2, ...]`. Length matches the `len` field (128 = 64 subcarriers for HT40 on S3).
 - `local_timestamp`: ESP32 monotonic microsecond counter (u32, wraps every ~71.6 min).
-- `timestamp_real`: derived UNIX epoch (float seconds), appended by the Python parser.
+- `timestamp_real`: UNIX epoch (float seconds with microseconds), stamped by the ESP32 via NTP — `0.000000` until its first sync, at which point the backend falls back to receive-time estimation.
 - The receiver applies AGC/FFT gain compensation (baseline sampled over first 100 packets).
 
 ## InfluxDB Troubleshooting
@@ -182,7 +189,7 @@ The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that vi
 
 ```bash
 # Terminal 1: Backend (replay mode — no hardware needed)
-SERIAL_PORT=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+REPLAY_CSV=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Terminal 2: Frontend dev server
 cd frontend && npm run dev
@@ -252,10 +259,13 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | Bandwidth | HT40 (40 MHz) | `CONFIG_WIFI_BANDWIDTH` |
 | ESP-NOW rate | MCS0, long GI | `CONFIG_ESP_NOW_RATE` |
 | Tx frequency | 100 Hz | `CONFIG_SEND_FREQUENCY` in csi_send |
-| Serial | 921600 8N1 | `sdkconfig.defaults` + `serial_baudrate` in Settings |
+| MQTT broker | 127.0.0.1:1883 | `mqtt_host`/`mqtt_port` in Settings |
+| MQTT topics | `home/csi/data` (QoS 0), `home/csi/status` (QoS 1) | `mqtt_topic_data`/`mqtt_topic_status` in Settings |
 | Gain control | enabled (ESP32-S3) | `CONFIG_GAIN_CONTROL` |
 | InfluxDB retention | 30 days | `influxdb_client.py` → `every_seconds=2592000` |
+| CSI cleanup retention | 7 days | `csi_retention_days` in Settings |
+| Cleanup interval | 30 min | `cleanup_interval_hours` in Settings |
 | InfluxDB write batch | 500 points / 1000ms | `WriteOptions` in `influxdb_client.py` |
 | Async queue size | 2000 | `main.py` consumer |
 | WS per-client queue | 256 | `ws_queue_maxsize` in Settings |
-| Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `serial_reader.py` |
+| Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `mqtt_reader.py` |

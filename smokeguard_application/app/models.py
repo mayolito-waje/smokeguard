@@ -195,11 +195,13 @@ class WSStatus(WSMessage):
     """Periodic or event-driven status update."""
 
     type: Literal["status"] = "status"  # type: ignore[assignment]
-    serial: Literal["connected", "disconnected", "reconnecting"]
+    mqtt: Literal["connected", "disconnected", "reconnecting"]
     packets: int
     dropped_lines: int
     last_record_at: float | None = None
     error: str | None = None
+    receiver_online: bool | None = None
+    ntp_synced: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +212,7 @@ class HealthResponse(BaseModel):
     """GET /api/health response."""
 
     status: str = "ok"
-    serial_connected: bool
+    mqtt_connected: bool
     packets_received: int
     dropped_lines: int
     influxdb_connected: bool
@@ -219,11 +221,13 @@ class HealthResponse(BaseModel):
 class StatusResponse(BaseModel):
     """GET /api/status response — detailed live status."""
 
-    serial_connected: bool
+    mqtt_connected: bool
     packets_received: int
     dropped_lines: int
     last_record_at: float | None = None
     reconnect_attempts: int = 0
+    receiver_online: bool | None = None
+    ntp_synced: bool | None = None
     influxdb_connected: bool
     websocket_clients: int
     uptime_seconds: float
@@ -249,6 +253,13 @@ class HistoryResponse(BaseModel):
 
     count: int
     points: list[HistoryPoint]
+
+
+class CleanupResponse(BaseModel):
+    """GET /api/cleanup response."""
+
+    status: str = "ok"
+    retention_days: int
 
 
 class ErrorResponse(BaseModel):

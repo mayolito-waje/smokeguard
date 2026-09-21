@@ -39,11 +39,13 @@ export interface SubcarrierMetadata {
 
 export interface WsStatus {
   type: 'status';
-  serial: 'connected' | 'disconnected' | 'reconnecting';
+  mqtt: 'connected' | 'disconnected' | 'reconnecting';
   packets: number;
   dropped_lines: number;
   last_record_at: number | null;
   error: string | null;
+  receiver_online?: boolean | null;
+  ntp_synced?: boolean | null;
 }
 
 export type WsMessage = WsWelcome | CsiFrame | WsStatus | { type: 'pong' };
