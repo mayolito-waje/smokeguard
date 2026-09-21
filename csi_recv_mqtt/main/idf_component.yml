@@ -1,0 +1,9 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.0"
+  # Gain compensation for the CSI values, same as the serial csi_recv example.
+  esp_csi_gain_ctrl: ">=0.1.4"
+  # Resolves the broker's "<host>.local" name over mDNS. Pulled from
+  # components.espressif.com on the first build, then cached in
+  # managed_components/.
+  espressif/mdns: "^1.13.0"

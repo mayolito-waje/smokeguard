@@ -33,10 +33,16 @@
 #define CONFIG_WIFI_2G_PROTOCOL             WIFI_PROTOCOL_11N
 #define CONFIG_WIFI_5G_PROTOCOL             WIFI_PROTOCOL_11N
 #else
-#define CONFIG_WIFI_BANDWIDTH           WIFI_BW_HT40
+/* HT20, not HT40. The receiver follows the hotspot, which negotiated 20 MHz,
+   so a 40 MHz sender is wider than the thing listening for it. Channel 1 is
+   also the bottom of the band: with HT40, wifi_init() below asks for
+   WIFI_SECOND_CHAN_BELOW on channel 1, and there is no channel below 1. */
+#define CONFIG_WIFI_BANDWIDTH           WIFI_BW_HT20
 #endif
 
-#define CONFIG_ESP_NOW_PHYMODE           WIFI_PHY_MODE_HT40
+/* Must not exceed the interface width -- an HT40 rate on a 20 MHz interface is
+   refused by the driver with ESP_ERR_ESPNOW_ARG. */
+#define CONFIG_ESP_NOW_PHYMODE           WIFI_PHY_MODE_HT20
 #define CONFIG_ESP_NOW_RATE             WIFI_PHY_RATE_MCS0_LGI
 #define CONFIG_SEND_FREQUENCY               100
 
@@ -121,7 +127,14 @@ static void wifi_esp_now_init(esp_now_peer_info_t peer)
         .ersu = false,
         .dcm = false
     };
-    ESP_ERROR_CHECK(esp_now_set_peer_rate_config(peer.peer_addr, &rate_config));
+    /* Non-fatal: the receiver's CSI callback reads the L-LTF, which every rate
+       carries, so a refused rate costs only the explicit MCS choice. Aborting
+       here would turn that into a boot loop that transmits nothing. */
+    esp_err_t err = esp_now_set_peer_rate_config(peer.peer_addr, &rate_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ESP-NOW rate config rejected (%s); using its default rate",
+                 esp_err_to_name(err));
+    }
 }
 
 void app_main()
