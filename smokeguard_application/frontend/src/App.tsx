@@ -5,6 +5,7 @@ import { onMetrics, getMetrics } from './store/csiStore';
 import type { MetricsSnapshot } from './types';
 import type { Theme } from './renderers/drawStripChart';
 import StripChart from './components/WaterfallChart';
+import SmokePanel from './components/SmokePanel';
 import './App.css';
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,7 @@ export default function App() {
         {/* ---- Main chart ---- */}
         <main className="main">
           <StripChart theme={theme} />
+          <SmokePanel theme={theme} />
         </main>
       </div>
 

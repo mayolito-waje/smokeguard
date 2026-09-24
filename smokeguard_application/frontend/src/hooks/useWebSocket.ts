@@ -9,6 +9,7 @@ import {
   startMetricsPoll,
   stopMetricsPoll,
 } from '../store/csiStore';
+import { pushSmokeSample } from '../store/smokeStore';
 
 // ---------------------------------------------------------------------------
 // URL resolution
@@ -73,6 +74,7 @@ export function useWebSocket(): UseWsResult {
       try {
         const msg: WsMessage = JSON.parse(ev.data);
         if (msg.type === 'csi') pushFrame(msg);
+        else if (msg.type === 'smoke') pushSmokeSample(msg);
       } catch { /* ignore malformed */ }
     };
 

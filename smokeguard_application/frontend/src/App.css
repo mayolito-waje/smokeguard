@@ -406,6 +406,180 @@ body,
 }
 
 /* ===================================================================
+   Air-quality panel (PMS5003)
+   =================================================================== */
+
+.smoke-panel {
+  flex-shrink: 0;
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.smoke-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-surface);
+}
+
+.smoke-title {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--ink3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.smoke-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.smoke-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--ink2);
+}
+
+.smoke-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.smoke-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.smoke-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.smoke-canvas-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.smoke-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.smoke-stats {
+  width: 208px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.smoke-hero {
+  display: flex;
+  gap: 8px;
+}
+
+.smoke-hero-tile {
+  flex: 1;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px 8px;
+}
+
+.smoke-hero-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink3);
+}
+
+.smoke-hero-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.15;
+}
+
+.smoke-hero-value small {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--ink3);
+}
+
+.smoke-section-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink3);
+  margin-top: 2px;
+}
+
+.smoke-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+}
+
+.smoke-stat-cell {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.smoke-stat-label {
+  color: var(--ink2);
+}
+
+.smoke-stat-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.smoke-stale-note {
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--ink3);
+}
+
+/* Staleness: sensor offline — dim the tiles (chart dims via the renderer) */
+.smoke-panel.stale .smoke-hero-value,
+.smoke-panel.stale .smoke-stat-value {
+  opacity: 0.45;
+}
+
+/* ===================================================================
    Footer
    =================================================================== */
 

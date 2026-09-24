@@ -1,9 +1,9 @@
-"""Background MQTT reader for ESP32 CSI data.
+"""Background MQTT reader for ESP32 CSI and air-quality data.
 
 Subscribes to the CSI data topic published by the csi_recv_mqtt firmware
-(or replays a CSV file for development), parses each payload, and pushes
-CSIRecord instances onto an asyncio.Queue for consumption by the main event
-loop.
+and the PMS5003 air-quality topic (or replays a CSI CSV file for
+development), parses each payload, and pushes records onto asyncio.Queues
+for consumption by the main event loop.
 
 Key features:
 - paho-mqtt network thread replaces the old serial thread; on_message runs
@@ -13,8 +13,10 @@ Key features:
   estimation from the ESP32's microsecond counter (incl. 32-bit wraparound)
 - Also subscribes to the status topic to track receiver online / NTP-sync
   state (single-receiver setup assumed — later heartbeats overwrite)
+- The smoke topic carries PMS5003 CSV lines (timestamp,pm1_0,...,rssi);
+  a 0/negative timestamp falls back to receive time, same as CSI
 - Auto-reconnect via paho's built-in exponential backoff
-- Replay mode: reads from a .csv file when replay_csv is set
+- Replay mode: reads from a .csv file when replay_csv is set (CSI only)
 """
 
 import asyncio
@@ -29,7 +31,7 @@ from threading import Event, Lock, Thread
 import paho.mqtt.client as mqtt
 
 from app.config import Settings
-from app.models import CSIRecord, DATA_COLUMNS_C5C6, DATA_COLUMNS_S3
+from app.models import CSIRecord, DATA_COLUMNS_C5C6, DATA_COLUMNS_S3, SmokeRecord
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,9 @@ class MqttStatus:
         self.ntp_synced: bool | None = None
         self.receiver_client: str | None = None
         self.last_status_at: float | None = None
+        # Smoke (air-quality) counters — debug/status use only
+        self.smoke_packets: int = 0
+        self.smoke_last_at: float | None = None
 
     def snapshot(self) -> dict:
         """Return a dict copy of the current status (thread-safe)."""
@@ -70,6 +75,8 @@ class MqttStatus:
                 "ntp_synced": self.ntp_synced,
                 "receiver_client": self.receiver_client,
                 "last_status_at": self.last_status_at,
+                "smoke_packets": self.smoke_packets,
+                "smoke_last_at": self.smoke_last_at,
             }
 
     def update(self, **kwargs: object) -> None:
@@ -90,21 +97,23 @@ class MqttStatus:
 
 
 class CsiMqttReader:
-    """Subscribes to CSI data over MQTT (or replays a CSV file).
+    """Subscribes to CSI and smoke-sensor data over MQTT (or replays a CSV file).
 
-    Parsed CSIRecord objects are pushed onto an asyncio.Queue via
-    call_soon_threadsafe, keeping the paho network thread free of async
-    concerns — the same pattern the old serial thread used.
+    Parsed CSIRecord / SmokeRecord objects are pushed onto their respective
+    asyncio.Queues via call_soon_threadsafe, keeping the paho network thread
+    free of async concerns — the same pattern the old serial thread used.
     """
 
     def __init__(
         self,
         settings: Settings,
         queue: asyncio.Queue[CSIRecord],
+        smoke_queue: asyncio.Queue[SmokeRecord],
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.settings = settings
         self._queue = queue
+        self._smoke_queue = smoke_queue
         self._loop = loop
         self._stop_event = Event()
         self._thread: Thread | None = None
@@ -158,9 +167,10 @@ class CsiMqttReader:
         client.loop_start()
         self._client = client
         logger.info(
-            "MQTT reader started (broker %s:%d, topics: %s, %s)",
+            "MQTT reader started (broker %s:%d, topics: %s, %s, %s)",
             self.settings.mqtt_host, self.settings.mqtt_port,
             self.settings.mqtt_topic_data, self.settings.mqtt_topic_status,
+            self.settings.mqtt_topic_smoke,
         )
 
     def stop(self) -> None:
@@ -197,7 +207,7 @@ class CsiMqttReader:
     # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
-        """Subscribe to the CSI topics once connected to the broker."""
+        """Subscribe to the data topics once connected to the broker."""
         if reason_code.is_failure:
             self.status.update(
                 connected=False,
@@ -210,10 +220,11 @@ class CsiMqttReader:
         client.subscribe([
             (self.settings.mqtt_topic_data, 0),    # CSI is loss-tolerant
             (self.settings.mqtt_topic_status, 1),  # status is retained/low-rate
+            (self.settings.mqtt_topic_smoke, 0),   # PMS5003, live-only
         ])
         self._reset_timestamps()
         self.status.update(connected=True, error=None, reconnect_attempts=0)
-        logger.info("Connected to MQTT broker, subscribed to CSI topics")
+        logger.info("Connected to MQTT broker, subscribed to data topics")
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
         """Record the drop; paho's network thread keeps retrying on its own."""
@@ -229,7 +240,7 @@ class CsiMqttReader:
         logger.warning("MQTT disconnected: %s", reason_code)
 
     def _on_message(self, client, userdata, msg) -> None:
-        """Dispatch a message by topic: CSI data or receiver status.
+        """Dispatch a message by topic: CSI data, smoke data, or receiver status.
 
         The dispatch is wrapped so a malformed payload can never raise out
         of this callback — an uncaught exception here would kill paho's
@@ -244,6 +255,14 @@ class CsiMqttReader:
                 line = msg.payload.decode("utf-8", errors="replace").strip()
                 if line:
                     self._process_line(line)
+            elif msg.topic == self.settings.mqtt_topic_smoke:
+                # Live-only QoS 0 topic; skip retained messages as a
+                # stale-line guard
+                if msg.retain:
+                    return
+                line = msg.payload.decode("utf-8", errors="replace").strip()
+                if line:
+                    self._process_smoke_line(line)
             elif msg.topic == self.settings.mqtt_topic_status:
                 self._handle_status_payload(msg.payload)
         except Exception:
@@ -444,6 +463,80 @@ class CsiMqttReader:
             last_record_at=timestamp_real,
             dropped_lines=self.status.dropped_lines,
         )
+
+    # ------------------------------------------------------------------
+    # Smoke line parsing
+    # ------------------------------------------------------------------
+
+    def _process_smoke_line(self, line: str) -> None:
+        """Parse one PMS5003 CSV line into a SmokeRecord and push to the queue.
+
+        CSV: timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi
+        (no header). timestamp is UNIX epoch seconds; 0 (NTP unsynced) falls
+        back to receive time, mirroring the CSI timestamp_real fallback.
+        """
+        try:
+            reader = csv.reader(StringIO(line))
+            row = next(reader)
+        except (csv.Error, StopIteration):
+            self.status.update(dropped_lines=self.status.dropped_lines + 1)
+            return
+
+        if len(row) != 11:
+            logger.debug("Smoke line field count %d (expected 11), skipping",
+                         len(row))
+            self.status.update(dropped_lines=self.status.dropped_lines + 1)
+            return
+
+        try:
+            ts = float(row[0])
+            values = [int(v) for v in row[1:]]
+        except ValueError:
+            logger.debug("Smoke line has non-numeric fields, skipping: %r",
+                         line[:80])
+            self.status.update(dropped_lines=self.status.dropped_lines + 1)
+            return
+
+        # Sensor clock not NTP-synced yet (or missing) — fall back to
+        # receive time, same as the CSI timestamp_real fallback
+        timestamp_real = ts if ts > 0.0 else time.time()
+
+        record = SmokeRecord(
+            timestamp_real=timestamp_real,
+            pm1_0=values[0],
+            pm2_5=values[1],
+            pm10=values[2],
+            cnt0_3=values[3],
+            cnt0_5=values[4],
+            cnt1_0=values[5],
+            cnt2_5=values[6],
+            cnt5_0=values[7],
+            cnt10=values[8],
+            rssi=values[9],
+        )
+
+        self._loop.call_soon_threadsafe(self._safe_smoke_enqueue, record)
+        self.status.update(
+            smoke_packets=self.status.smoke_packets + 1,
+            smoke_last_at=timestamp_real,
+        )
+
+    def _safe_smoke_enqueue(self, record: SmokeRecord) -> None:
+        """Enqueue a smoke record, dropping oldest if the queue is full.
+
+        This is called via call_soon_threadsafe on the event loop thread.
+        """
+        try:
+            self._smoke_queue.put_nowait(record)
+        except asyncio.QueueFull:
+            try:
+                self._smoke_queue.get_nowait()  # Drop oldest
+                self._smoke_queue.put_nowait(record)
+            except (asyncio.QueueFull, asyncio.QueueEmpty):
+                pass
+        except RuntimeError:
+            # Event loop already closed during shutdown — drop the record
+            pass
 
     # ------------------------------------------------------------------
     # Timestamp computation (fallback only)

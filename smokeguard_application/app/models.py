@@ -153,13 +153,38 @@ class CSIRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Smoke (air-quality) records
+# ---------------------------------------------------------------------------
+
+class SmokeRecord(BaseModel):
+    """A single PMS5003 air-quality reading parsed from the smoke MQTT topic.
+
+    CSV: timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi
+    """
+
+    timestamp_real: float = Field(
+        description="UNIX epoch seconds; receive time when the sensor clock was unsynced (0)"
+    )
+    pm1_0: int
+    pm2_5: int
+    pm10: int
+    cnt0_3: int
+    cnt0_5: int
+    cnt1_0: int
+    cnt2_5: int
+    cnt5_0: int
+    cnt10: int
+    rssi: int
+
+
+# ---------------------------------------------------------------------------
 # WebSocket message envelope
 # ---------------------------------------------------------------------------
 
 class WSMessage(BaseModel):
     """Envelope for WebSocket messages sent to the React frontend."""
 
-    type: Literal["welcome", "csi", "status", "pong"]
+    type: Literal["welcome", "csi", "smoke", "status", "pong"]
 
 
 class WSWelcome(WSMessage):
@@ -189,6 +214,23 @@ class WSCsiData(WSMessage):
     i: list[int]
     q: list[int]
     metadata: dict | None = None
+
+
+class WSSmokeData(WSMessage):
+    """Air-quality reading broadcast to all connected clients."""
+
+    type: Literal["smoke"] = "smoke"  # type: ignore[assignment]
+    t: float
+    pm1_0: int
+    pm2_5: int
+    pm10: int
+    cnt0_3: int
+    cnt0_5: int
+    cnt1_0: int
+    cnt2_5: int
+    cnt5_0: int
+    cnt10: int
+    rssi: int
 
 
 class WSStatus(WSMessage):

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.influxdb_client import InfluxClient
-from app.models import CSIRecord, WSCsiData, WSStatus
+from app.models import CSIRecord, SmokeRecord, WSCsiData, WSSmokeData, WSStatus
 from app.mqtt_reader import CsiMqttReader
 from app.routes import api, ws
 from app.websocket_manager import ConnectionManager
@@ -85,9 +85,13 @@ def create_app() -> FastAPI:
         # Shared queue: MQTT network thread → async consumer
         queue: asyncio.Queue[CSIRecord] = asyncio.Queue(maxsize=2000)
 
+        # Smoke queue: PMS5003 readings at ~1 Hz (separate from the 100 Hz
+        # CSI queue so a CSI flood can never evict smoke samples)
+        smoke_queue: asyncio.Queue[SmokeRecord] = asyncio.Queue(maxsize=512)
+
         # MQTT reader (paho network thread, or CSV replay thread)
         loop = asyncio.get_running_loop()
-        mqtt_reader = CsiMqttReader(settings, queue, loop)
+        mqtt_reader = CsiMqttReader(settings, queue, smoke_queue, loop)
         app.state.mqtt_status = mqtt_reader.status
         mqtt_reader.start()
 
@@ -123,6 +127,36 @@ def create_app() -> FastAPI:
                     await ws_manager.broadcast_sync(ws_msg.model_dump(by_alias=False))
 
         consumer_task = asyncio.create_task(consume_queue())
+
+        # Smoke consumer task: fans out from smoke_queue → InfluxDB + WebSocket
+        async def consume_smoke_queue() -> None:
+            while True:
+                record = await smoke_queue.get()
+                if record is None:  # Shutdown sentinel
+                    break
+
+                # Write to InfluxDB
+                if influx and influx.connected:
+                    influx.write_smoke(record)
+
+                # Broadcast to WebSocket clients
+                if ws_manager and ws_manager.client_count > 0:
+                    ws_msg = WSSmokeData(
+                        t=record.timestamp_real,
+                        pm1_0=record.pm1_0,
+                        pm2_5=record.pm2_5,
+                        pm10=record.pm10,
+                        cnt0_3=record.cnt0_3,
+                        cnt0_5=record.cnt0_5,
+                        cnt1_0=record.cnt1_0,
+                        cnt2_5=record.cnt2_5,
+                        cnt5_0=record.cnt5_0,
+                        cnt10=record.cnt10,
+                        rssi=record.rssi,
+                    )
+                    await ws_manager.broadcast_sync(ws_msg.model_dump())
+
+        smoke_consumer_task = asyncio.create_task(consume_smoke_queue())
 
         # Periodic status broadcast task
         async def broadcast_status() -> None:
@@ -161,20 +195,25 @@ def create_app() -> FastAPI:
         app.state.mqtt_reader = mqtt_reader
         app.state.num_subcarriers = settings.num_subcarriers
         app.state._consumer_task = consumer_task
+        app.state._smoke_consumer_task = smoke_consumer_task
         app.state._status_task = status_task
         app.state._cleanup_task = cleanup_task
         app.state._queue = queue
+        app.state._smoke_queue = smoke_queue
         app.state._settings = settings
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:
-        # Signal consumer to stop
+        # Signal consumers to stop
         queue = getattr(app.state, "_queue", None)
         if queue:
             await queue.put(None)
+        smoke_queue = getattr(app.state, "_smoke_queue", None)
+        if smoke_queue:
+            await smoke_queue.put(None)
 
         # Cancel tasks
-        for attr in ("_consumer_task", "_status_task", "_cleanup_task"):
+        for attr in ("_consumer_task", "_smoke_consumer_task", "_status_task", "_cleanup_task"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

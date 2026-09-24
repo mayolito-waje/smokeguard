@@ -48,7 +48,22 @@ export interface WsStatus {
   ntp_synced?: boolean | null;
 }
 
-export type WsMessage = WsWelcome | CsiFrame | WsStatus | { type: 'pong' };
+export interface SmokeSample {
+  type: 'smoke';
+  t: number;
+  pm1_0: number;
+  pm2_5: number;
+  pm10: number;
+  cnt0_3: number;
+  cnt0_5: number;
+  cnt1_0: number;
+  cnt2_5: number;
+  cnt5_0: number;
+  cnt10: number;
+  rssi: number;
+}
+
+export type WsMessage = WsWelcome | CsiFrame | SmokeSample | WsStatus | { type: 'pong' };
 
 // ---------------------------------------------------------------------------
 // Application state

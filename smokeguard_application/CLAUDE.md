@@ -38,32 +38,35 @@ InfluxDB v2.7.10 binary is at `influxdb_bin/influxd`. Data is stored in `./influ
 
 ```
 ESP32 Rx (csi_recv_mqtt) --MQTT--> Mosquitto broker (this laptop)
-        │                              home/csi/data (CSV lines, QoS 0)
-        │                              home/csi/status (JSON, QoS 1 retained)
-        ▼                              (or CSV replay)
+ESP32 PMS5003 sensor   --MQTT-->   home/csi/data (CSV lines, QoS 0)
+        │                          home/csi/status (JSON, QoS 1 retained)
+        │                          home/smoke_sensor/data (CSV, QoS 0)
+        ▼                          (or CSV replay — CSI only)
 ┌──────────────────┐
 │  CsiMqttReader   │  paho network thread
-│  (mqtt_reader)   │  parses CSI_DATA CSV payloads → CSIRecord
+│  (mqtt_reader)   │  parses CSI CSV → CSIRecord, smoke CSV → SmokeRecord
 └──────┬───────────┘
        │ call_soon_threadsafe
        ▼
-┌──────────────────┐
-│  asyncio.Queue   │  maxsize=2000, overflow drops oldest
-└──────┬───────────┘
-       │ consumer task
+┌─────────────────────────────┐
+│  asyncio.Queues             │  CSI maxsize=2000, smoke maxsize=512
+│  (overflow drops oldest)    │
+└──────┬──────────────────────┘
+       │ two consumer tasks
        ├──────────────────────────────┐
        ▼                              ▼
 ┌──────────────────┐     ┌──────────────────┐
 │  InfluxClient    │     │ ConnectionMgr    │
 │  (batched write) │     │ (per-client      │
-│                  │     │  bounded queues) │
+│  csi_reading +   │     │  bounded queues) │
+│  smoke_reading   │     │                  │
 └──────────────────┘     └──────────────────┘
 ```
 
 Key design decisions:
-- The paho network thread never touches I/O outside of MQTT — it pushes parsed `CSIRecord` objects onto the async queue via `call_soon_threadsafe`.
+- The paho network thread never touches I/O outside of MQTT — it pushes parsed `CSIRecord`/`SmokeRecord` objects onto the async queues via `call_soon_threadsafe`.
 - Reconnects are paho's job: `reconnect_delay_set(1, 30)` gives exponential backoff, and subscriptions are re-established in `on_connect`.
-- A single consumer task drains the queue and fans out to InfluxDB + WebSocket.
+- Two consumer tasks drain the two queues independently — a 100 Hz CSI flood can never evict or delay 1 Hz smoke samples.
 - WebSocket broadcast uses pre-serialized JSON (one `json.dumps` per message, not per client).
 - Per-client bounded queues drop oldest messages when full — slow clients never stall the 100 Hz pipeline.
 - InfluxDB writes use the official client's background batching thread (`batch_size=500`, `flush_interval=1000ms`).
@@ -72,8 +75,10 @@ Key design decisions:
 ### CSI parsing (`app/mqtt_reader.py`)
 
 Two input modes:
-- **MQTT mode** (default): subscribes to `home/csi/data` (QoS 0) and `home/csi/status` (QoS 1). Each data payload is one CSV line; retained data messages are skipped. Status JSON updates `receiver_online` / `ntp_synced` (the retained LWT `{"state":"offline"}` marks the receiver dead).
-- **Replay mode**: when `REPLAY_CSV` is set to a `.csv` path, reads the CSV file directly. Pre-parsed rows are passed to `_process_row()` to avoid re-splitting the quoted JSON `data` column.
+- **MQTT mode** (default): subscribes to `home/csi/data` (QoS 0), `home/csi/status` (QoS 1), and `home/smoke_sensor/data` (QoS 0, PMS5003 air-quality sensor). Each data payload is one CSV line; retained data messages are skipped. Status JSON updates `receiver_online` / `ntp_synced` (the retained LWT `{"state":"offline"}` marks the receiver dead).
+- **Replay mode**: when `REPLAY_CSV` is set to a `.csv` path, reads the CSV file directly. Pre-parsed rows are passed to `_process_row()` to avoid re-splitting the quoted JSON `data` column. Replays CSI only — smoke data requires live MQTT.
+
+Smoke CSV format (11 fields, no header): `timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi` — `_process_smoke_line()` parses it into a `SmokeRecord`. `timestamp` is UNIX epoch seconds; 0/negative (NTP unsynced) falls back to server receive time, mirroring the CSI fallback. Malformed lines bump `dropped_lines`.
 
 Two format variants detected by field count:
 - **ESP32-S3** (25/26 columns): `local_timestamp` at index 18, `data` at index 24 (or -2 with `timestamp_real` appended).
@@ -93,6 +98,13 @@ For unknown lengths (LLTF mode with ~50–57 subcarriers, or other custom modes)
 - **Timestamp**: `timestamp_real` in nanosecond precision (`WritePrecision.NS`) — preserves the actual CSI capture time, not server receive time.
 - **Queries**: Flux with `pivot(rowKey: ["_time"], columnKey: ["_field"])` to reconstruct wide rows, then `_execute_history_query` rebuilds `i`/`q` arrays from column names.
 
+Second measurement written by `write_smoke()`:
+- **Measurement**: `smoke_reading` (PMS5003 air-quality)
+- **Tags**: none (single fixed sensor)
+- **Fields**: `pm1_0`, `pm2_5`, `pm10`, `cnt0_3`, `cnt0_5`, `cnt1_0`, `cnt2_5`, `cnt5_0`, `cnt10`, `rssi`
+- **Timestamp**: sensor `timestamp_real` (receive-time fallback) in nanosecond precision.
+- Excluded from the 7-day CSI cleanup (the delete predicate is `_measurement="csi_reading"` only); the bucket's 30-day retention governs it.
+
 ### WebSocket messages (`app/websocket_manager.py`, `app/routes/ws.py`)
 
 Server → client at `GET /ws`:
@@ -104,6 +116,9 @@ Server → client at `GET /ws`:
  "i": [0,0,10,9,...], "q": [0,0,3,3,...],
  "metadata": {"data_start_idx": 6, "data_end_idx": 31, "dc_null_idx": 32, ...,
               "subcarrier_index_offset": 32}}
+{"type": "smoke", "t": 1727090000.0, "pm1_0": 7, "pm2_5": 15, "pm10": 22,
+ "cnt0_3": 1800, "cnt0_5": 600, "cnt1_0": 200, "cnt2_5": 90, "cnt5_0": 30,
+ "cnt10": 4, "rssi": -52}
 {"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
  "receiver_online": true, "ntp_synced": true, ...}
 {"type": "pong"}
@@ -183,7 +198,7 @@ curl -fsSL "https://dl.influxdata.com/influxdb/releases/influxdb2-client-2.7.5-l
 
 ## React Frontend
 
-The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that visualizes the live CSI amplitude stream as a **pulse-monitor style strip chart** (scrolling time-series, one polyline per subcarrier). Includes a dashboard layout with sidebar metrics, rotating smoking trivia (sourced from Wikipedia), light/dark theme toggle, and a placeholder for the future detection model.
+The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that visualizes the live CSI amplitude stream as a **pulse-monitor style strip chart** (scrolling time-series, one polyline per subcarrier), with a bottom **air-quality panel** showing the PMS5003 PM1.0/PM2.5/PM10 strip chart plus a stat rail (PM2.5/PM10 headline tiles, particle counts, RSSI). Includes a dashboard layout with sidebar metrics, rotating smoking trivia (sourced from Wikipedia), light/dark theme toggle, and a placeholder for the future detection model.
 
 ### Quick Start
 
@@ -202,15 +217,16 @@ cd frontend && npm run dev
 cd frontend && npm run build   # → dist/
 ```
 
-### Architecture (10 source files)
+### Architecture (14 source files)
 
 - **100 Hz data path**: CSI frames arrive via WebSocket → parsed → `csiStore.pushFrame()` computes amplitude (`sqrt(I²+Q²)`) and pushes into a module-level ring buffer (max 600 frames, ~6 s at 100 Hz). No React re-renders per frame.
 - **Canvas at 60 fps**: `StripChart` (exported from `WaterfallChart.tsx`) runs its own `requestAnimationFrame` loop, pulling the latest frame from the store, maintaining a 600-frame ring buffer, and calling the pure render function `drawStripChart()`.
 - **React at ~5 Hz**: Sidebar metrics tiles (RSSI, noise floor, packet count, pkts/s) and WS connection badge use React state, updated via a throttled `setInterval`.
 - **Strip chart** (`src/renderers/drawStripChart.ts`): X-axis = elapsed time (newest at right), Y-axis = amplitude (0 at bottom, stable nice-number ticks with hysteresis). Each subcarrier is a coloured polyline — spectral gradient (blue → red), data subcarriers vibrant, guard bands muted, DC null as a gray dashed line. Theme-aware (light/dark palettes). Non-data subcarriers are visually distinguished.
-- **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card, model placeholder), main chart area, footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
+- **Air-quality panel** (bottom of `main`): 1 Hz smoke samples arrive via WebSocket → `smokeStore.pushSmokeSample()` (600-sample ring, ~10 min; per-series peak-hold auto-scale; QoS-0 dedupe via monotonic `t` guard; staleness from `performance.now()` — `STALE_AFTER_MS` = 15 s). `SmokePanel` runs its own rAF loop calling `drawSmokeChart()`; stat tiles update via the store's rAF-coalesced subscription. Series palette (validated CVD-safe hexes, see `drawSmokeChart.ts` header comment) + HTML legend in the toolbar; stat rail doubles as the table view. Sensor offline → tiles dim + `SENSOR OFFLINE` badge.
+- **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card, model placeholder), main chart area (CSI chart on top, air-quality panel below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
 - **Trivia** (`src/hooks/useSmokingFacts.ts`): Fetches intro extracts from 15 Wikipedia smoking-related articles on first load, parses into sentences, combines with 30 hand-picked fallback facts, and caches in `localStorage` for 24 hours. Rotates every 8 seconds in the sidebar.
-- **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to the store.
+- **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore` and `smoke` messages to `smokeStore`.
 - **No charting libraries, no state management libraries** — pure Canvas 2D API rendering.
 
 ### Key Files
@@ -218,13 +234,16 @@ cd frontend && npm run build   # → dist/
 | File | Purpose |
 |------|---------|
 | `src/store/csiStore.ts` | Module-level singleton — 600-frame ring buffer, amplitude precomputation, EMA auto-scale, frame/metrics subscribers |
+| `src/store/smokeStore.ts` | Module-level singleton for the 1 Hz smoke path — 600-sample ring, peak-hold auto-scale, dedupe, staleness, rAF-coalesced subscribers |
 | `src/hooks/useWebSocket.ts` | WS lifecycle, reconnect with backoff, heartbeat, message→store dispatch |
 | `src/hooks/useSmokingFacts.ts` | Fetches smoking facts from Wikipedia API, caches in localStorage for 24h, falls back to 30 hardcoded facts |
 | `src/renderers/drawStripChart.ts` | Strip-chart renderer — per-subcarrier polylines over time, theme-aware light/dark palettes, stable Y-axis ticks with hysteresis, non-data subcarrier suppression |
+| `src/renderers/drawSmokeChart.ts` | Air-quality renderer — 3 PM series (one µg/m³ Y axis), validated CVD-safe series colors, direct end-labels, offline badge; exports `SERIES_COLORS` for the HTML legend |
 | `src/renderers/drawWaterfall.ts` | (Orphaned) Original 3-D perspective waterfall renderer — kept for reference, not imported by any component |
 | `src/components/WaterfallChart.tsx` | Canvas component (exports `StripChart`) — rAF loop, 600-frame buffer, pause toggle, DPR-aware canvas sizing, accepts `theme` prop |
-| `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia, model placeholder), main chart, footer |
-| `src/types.ts` | `CsiFrame`, `WsMessage`, `SubcarrierMetadata`, `MetricsSnapshot` |
+| `src/components/SmokePanel.tsx` | Bottom air-quality panel — rAF canvas (PM1.0/PM2.5/PM10), stat rail (PM2.5/PM10 hero tiles, particle counts, RSSI), staleness dimming, pause toggle |
+| `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia, model placeholder), main chart + air-quality panel, footer |
+| `src/types.ts` | `CsiFrame`, `SmokeSample`, `WsMessage`, `SubcarrierMetadata`, `MetricsSnapshot` |
 
 ### Theme System
 
@@ -260,7 +279,7 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | ESP-NOW rate | MCS0, long GI | `CONFIG_ESP_NOW_RATE` |
 | Tx frequency | 100 Hz | `CONFIG_SEND_FREQUENCY` in csi_send |
 | MQTT broker | 127.0.0.1:1883 | `mqtt_host`/`mqtt_port` in Settings |
-| MQTT topics | `home/csi/data` (QoS 0), `home/csi/status` (QoS 1) | `mqtt_topic_data`/`mqtt_topic_status` in Settings |
+| MQTT topics | `home/csi/data` (QoS 0), `home/csi/status` (QoS 1), `home/smoke_sensor/data` (QoS 0) | `mqtt_topic_data`/`mqtt_topic_status`/`mqtt_topic_smoke` in Settings |
 | Gain control | enabled (ESP32-S3) | `CONFIG_GAIN_CONTROL` |
 | InfluxDB retention | 30 days | `influxdb_client.py` → `every_seconds=2592000` |
 | CSI cleanup retention | 7 days | `csi_retention_days` in Settings |
