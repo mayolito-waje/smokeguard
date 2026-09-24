@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     mqtt_password: str = ""
     mqtt_topic_data: str = "home/csi/data"
     mqtt_topic_status: str = "home/csi/status"
+    mqtt_topic_smoke: str = "home/smoke_sensor/data"
     mqtt_client_id: str = "smokeguard-backend"
 
     # CSV replay mode (development without hardware): set to a .csv path to

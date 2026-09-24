@@ -12,7 +12,7 @@ from influxdb_client.client.write.point import Point
 from influxdb_client.rest import ApiException
 
 from app.config import Settings
-from app.models import CSIRecord, HistoryPoint
+from app.models import CSIRecord, HistoryPoint, SmokeRecord
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,48 @@ class InfluxClient:
 
         return point
 
+    def write_smoke(self, record: SmokeRecord) -> None:
+        """Convert a smoke record to an InfluxDB Point and enqueue for writing.
+
+        Does not block — the WriteApi batches points in a background thread.
+        """
+        if not self._connected or not self._write_api:
+            return
+
+        try:
+            point = self._to_smoke_point(record)
+            self._write_api.write(
+                bucket=self.settings.influxdb_bucket,
+                org=self.settings.influxdb_org,
+                record=point,
+            )
+        except Exception as exc:
+            logger.error("InfluxDB smoke write error: %s", exc)
+
+    def _to_smoke_point(self, record: SmokeRecord) -> Point:
+        """Build an InfluxDB Point from a smoke record.
+
+        Measurement: smoke_reading
+        Tags: none (single fixed sensor — no cardinality benefit)
+        Fields: pm1_0, pm2_5, pm10, cnt0_3, cnt0_5, cnt1_0, cnt2_5, cnt5_0,
+                cnt10, rssi
+        Timestamp: timestamp_real (sensor clock or receive-time fallback) in ns
+        """
+        point = Point("smoke_reading")
+        point.field("pm1_0", record.pm1_0)
+        point.field("pm2_5", record.pm2_5)
+        point.field("pm10", record.pm10)
+        point.field("cnt0_3", record.cnt0_3)
+        point.field("cnt0_5", record.cnt0_5)
+        point.field("cnt1_0", record.cnt1_0)
+        point.field("cnt2_5", record.cnt2_5)
+        point.field("cnt5_0", record.cnt5_0)
+        point.field("cnt10", record.cnt10)
+        point.field("rssi", record.rssi)
+        ts_ns = int(record.timestamp_real * 1_000_000_000)
+        point.time(ts_ns)
+        return point
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -180,9 +222,10 @@ class InfluxClient:
         """Permanently delete readings older than `days` days from the bucket.
 
         Only CSI readings are removed (predicate on `_measurement`), leaving
-        any other measurement in the bucket untouched. Export CSVs before the
-        retention window expires — deleted points cannot be recovered.
-        Returns True on success.
+        any other measurement in the bucket untouched — smoke_reading is
+        intentionally excluded (low-rate; the bucket's 30-day retention
+        governs it). Export CSVs before the retention window expires —
+        deleted points cannot be recovered. Returns True on success.
         """
         if not self._connected or not self._client:
             return False
