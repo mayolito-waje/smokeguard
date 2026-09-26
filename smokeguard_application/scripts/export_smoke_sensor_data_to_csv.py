@@ -57,6 +57,8 @@ def main() -> int:
                         help="Flux range start (ISO 8601 or relative, default: -30d)")
     parser.add_argument("--stop", default="",
                         help="Flux range stop (ISO 8601, default: now)")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="HTTP read timeout in seconds (default: 300)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -79,7 +81,9 @@ def main() -> int:
     """
 
     print(f"Querying bucket '{bucket}' (range: {args.start}..{args.stop or 'now'})...")
-    with InfluxDBClient(url=url, token=token, org=org) as client:
+    # Raise the client's default 10 s read timeout — large pivots exceed it.
+    with InfluxDBClient(url=url, token=token, org=org,
+                        timeout=args.timeout * 1000) as client:
         query_api = client.query_api()
         tables = query_api.query(flux)
 
@@ -90,9 +94,9 @@ def main() -> int:
         writer.writerow(COLUMNS)
 
         for table in tables:
-            for record in table.records:
-                if args.limit and rows >= args.limit:
-                    break
+            # Flux sorts ascending; --limit takes the latest N rows.
+            records = table.records[-args.limit:] if args.limit else table.records
+            for record in records:
                 v = record.values
 
                 ts = record.get_time()
@@ -119,8 +123,6 @@ def main() -> int:
                     fmt_int(v.get("rssi")),
                 ])
                 rows += 1
-            if args.limit and rows >= args.limit:
-                break
 
     print(f"Exported {rows} rows to {args.out}")
     print('Feed a line back via: mosquitto_pub -t home/smoke_sensor/data '

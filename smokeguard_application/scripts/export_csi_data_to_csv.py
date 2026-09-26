@@ -59,6 +59,8 @@ def main() -> int:
                         help="Flux range start (ISO 8601 or relative, default: -30d)")
     parser.add_argument("--stop", default="",
                         help="Flux range stop (ISO 8601, default: now)")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="HTTP read timeout in seconds (default: 300)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -77,13 +79,23 @@ def main() -> int:
       |> range(start: {args.start}{', stop: ' + args.stop if args.stop else ''})
       |> filter(fn: (r) => r._measurement == "csi_reading")
       |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-      |> sort(columns: ["_time"], desc: false)
     """
 
     print(f"Querying bucket '{bucket}' (range: {args.start}..{args.stop or 'now'})...")
-    with InfluxDBClient(url=url, token=token, org=org) as client:
+    # The pivot over ~140 fields is slow: ~15 s for 116k readings. The client's
+    # default read timeout is 10 s, which aborts large exports — raise it.
+    with InfluxDBClient(url=url, token=token, org=org,
+                        timeout=args.timeout * 1000) as client:
         query_api = client.query_api()
         tables = query_api.query(flux)
+
+    # Flux sorts per pivoted table, but pivot splits by tag set, so table
+    # order isn't time order. Sort globally so the CSV is one continuous
+    # time series, and --limit takes the latest N rows.
+    records = [r for t in tables for r in t.records if r.get_time() is not None]
+    records.sort(key=lambda r: r.get_time())
+    if args.limit:
+        records = records[-args.limit:]
 
     rows = 0
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -91,58 +103,50 @@ def main() -> int:
         writer = csv.writer(fh)
         writer.writerow(COLUMNS)
 
-        for table in tables:
-            for record in table.records:
-                if args.limit and rows >= args.limit:
-                    break
-                v = record.values
+        for record in records:
+            v = record.values
 
-                # Reconstruct interleaved I/Q array from i_N / q_N fields.
-                n = 0
-                data: list[int] = []
-                while f"i_{n}" in v:
-                    data.append(as_int(v.get(f"i_{n}")))
-                    data.append(as_int(v.get(f"q_{n}")))
-                    n += 1
-                if not data:
-                    continue
+            # Reconstruct interleaved I/Q array from i_N / q_N fields.
+            n = 0
+            data: list[int] = []
+            while f"i_{n}" in v:
+                data.append(as_int(v.get(f"i_{n}")))
+                data.append(as_int(v.get(f"q_{n}")))
+                n += 1
+            if not data:
+                continue
 
-                ts = record.get_time()
-                if ts is None:
-                    continue
-                ts = ts.astimezone(timezone.utc)
+            ts = record.get_time().astimezone(timezone.utc)
 
-                writer.writerow([
-                    "CSI_DATA",                          # type (constant)
-                    as_int(v.get("seq")),                # id
-                    str(v.get("mac", "")),               # mac
-                    as_int(v.get("rssi")),               # rssi
-                    as_int(v.get("rate")),               # rate
-                    as_int(v.get("sig_mode")),           # sig_mode
-                    as_int(v.get("mcs")),                # mcs
-                    as_int(v.get("bandwidth")),          # bandwidth
-                    as_int(v.get("smoothing")),          # smoothing
-                    as_int(v.get("not_sounding")),       # not_sounding
-                    as_int(v.get("aggregation")),        # aggregation
-                    as_int(v.get("stbc")),               # stbc
-                    as_int(v.get("fec_coding")),         # fec_coding
-                    as_int(v.get("sgi")),                # sgi
-                    as_int(v.get("noise_floor")),        # noise_floor
-                    as_int(v.get("ampdu_cnt")),          # ampdu_cnt
-                    as_int(v.get("channel")),            # channel
-                    as_int(v.get("secondary_channel")),  # secondary_channel
-                    0,                                   # local_timestamp (not stored)
-                    as_int(v.get("ant")),                # ant
-                    as_int(v.get("sig_len")),            # sig_len
-                    as_int(v.get("rx_state")),           # rx_state
-                    as_int(v.get("csi_len")),            # len
-                    as_int(v.get("first_word")),         # first_word
-                    json.dumps(data),                    # data (interleaved I/Q)
-                    f"{ts.timestamp():.6f}",             # timestamp_real
-                ])
-                rows += 1
-            if args.limit and rows >= args.limit:
-                break
+            writer.writerow([
+                "CSI_DATA",                          # type (constant)
+                as_int(v.get("seq")),                # id
+                str(v.get("mac", "")),               # mac
+                as_int(v.get("rssi")),               # rssi
+                as_int(v.get("rate")),               # rate
+                as_int(v.get("sig_mode")),           # sig_mode
+                as_int(v.get("mcs")),                # mcs
+                as_int(v.get("bandwidth")),          # bandwidth
+                as_int(v.get("smoothing")),          # smoothing
+                as_int(v.get("not_sounding")),       # not_sounding
+                as_int(v.get("aggregation")),        # aggregation
+                as_int(v.get("stbc")),               # stbc
+                as_int(v.get("fec_coding")),         # fec_coding
+                as_int(v.get("sgi")),                # sgi
+                as_int(v.get("noise_floor")),        # noise_floor
+                as_int(v.get("ampdu_cnt")),          # ampdu_cnt
+                as_int(v.get("channel")),            # channel
+                as_int(v.get("secondary_channel")),  # secondary_channel
+                0,                                   # local_timestamp (not stored)
+                as_int(v.get("ant")),                # ant
+                as_int(v.get("sig_len")),            # sig_len
+                as_int(v.get("rx_state")),           # rx_state
+                as_int(v.get("csi_len")),            # len
+                as_int(v.get("first_word")),         # first_word
+                json.dumps(data),                    # data (interleaved I/Q)
+                f"{ts.timestamp():.6f}",             # timestamp_real
+            ])
+            rows += 1
 
     print(f"Exported {rows} rows to {args.out}")
     print("Replay it with: REPLAY_CSV=./{} uv run uvicorn app.main:app --port 8000".format(args.out))
