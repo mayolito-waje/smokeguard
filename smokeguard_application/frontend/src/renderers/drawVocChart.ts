@@ -1,10 +1,16 @@
 /**
- * Air-quality strip-chart renderer — PM1.0 / PM2.5 / PM10 over time.
+ * VOC strip-chart renderer — BME680 gas resistance (kΩ) over time.
  *
- * Same skeleton as drawStripChart (theme surfaces, stable Y hysteresis,
- * recessive grid) but for 3 scalar series instead of 64 subcarrier traces.
- * One Y axis only — all three series share the µg/m³ scale; particle counts
- * live in the stat rail beside the chart.
+ * Same skeleton as drawStripChart (theme surfaces, stable-Y hysteresis,
+ * recessive grid) but for a single scalar series. Gas resistance DROPS
+ * under VOC exposure (~50–300 kΩ baseline → ~1–5 kΩ), so the Y scale has
+ * a min-hold floor in addition to the peak-hold ceiling — a 0-anchored
+ * scale would render the event as a line hugging the bottom.
+ *
+ * Deliberate deviation from the dataviz baseline: no hover tooltip, same
+ * as the existing CSI canvas chart (drawStripChart). The stat tiles
+ * beside the chart act as the table view, and the direct end-label
+ * carries the current value.
  */
 
 import type { Theme } from './drawStripChart';
@@ -29,7 +35,7 @@ const MIN_SPAN_S = 1.0;
 interface ChartColors {
   bg: string;
   grid: string;
-  zeroLine: string;
+  baseLine: string;
   inkMuted: string;
   nowLine: string;
 }
@@ -38,53 +44,46 @@ const PALETTE: Record<Theme, ChartColors> = {
   dark: {
     bg:        '#0d0d0d',
     grid:      'rgba(255,255,255,0.045)',
-    zeroLine:  'rgba(255,255,255,0.20)',
+    baseLine:  'rgba(255,255,255,0.20)',
     inkMuted:  '#6b6b66',
     nowLine:   'rgba(255,255,255,0.10)',
   },
   light: {
     bg:        '#f8faf8',
     grid:      'rgba(0,0,0,0.06)',
-    zeroLine:  'rgba(0,0,0,0.12)',
+    baseLine:  'rgba(0,0,0,0.12)',
     inkMuted:  '#8899a6',
     nowLine:   'rgba(0,0,0,0.08)',
   },
 };
 
 // ---------------------------------------------------------------------------
-// Series colours (validated — do not change without re-running the validator)
+// Series colour (validated — do not change without re-running the validator)
 //
-//   node scripts/validate_palette.js "#2a78d6,#eb6834,#199e70" --mode light --surface "#f8faf8"
-//     → ALL CHECKS PASS (worst adjacent CVD ΔE 8.4 protan; normal 27.1;
-//       contrast >= 3:1 on #f8faf8)
-//   node scripts/validate_palette.js "#3987e5,#d95926,#199e70" --mode dark  --surface "#0d0d0d"
-//     → ALL CHECKS PASS (worst adjacent CVD ΔE 9.4 deutan; normal 26.5;
-//       contrast >= 3:1 on #0d0d0d)
+// Reuses the green from the old PM palette, which passed on these exact
+// surfaces:
+//   node scripts/validate_palette.js "#199e70" --mode light --surface "#f8faf8"
+//     → ALL CHECKS PASS
+//   node scripts/validate_palette.js "#199e70" --mode dark  --surface "#0d0d0d"
+//     → ALL CHECKS PASS
 //
-// Identity is never colour-alone anyway: the HTML legend in the toolbar plus
-// direct end-labels carry it.
+// A single series needs no legend — the toolbar title names it, and the
+// direct end-label carries the current value.
 // ---------------------------------------------------------------------------
 
-export interface SmokeColors {
-  pm1_0: string;
-  pm2_5: string;
-  pm10: string;
-}
-
-export const SERIES_COLORS: Record<Theme, SmokeColors> = {
-  light: { pm1_0: '#2a78d6', pm2_5: '#eb6834', pm10: '#199e70' },
-  dark:  { pm1_0: '#3987e5', pm2_5: '#d95926', pm10: '#199e70' },
+export const GAS_COLOR: Record<Theme, string> = {
+  light: '#199e70',
+  dark:  '#199e70',
 };
 
-const SERIES_KEYS = ['pm1_0', 'pm2_5', 'pm10'] as const;
-
 // ---------------------------------------------------------------------------
-// Stable Y-axis scale (hysteresis so labels don't vibrate)
+// Stable Y-axis scale (hysteresis on both bounds so labels don't vibrate)
 // ---------------------------------------------------------------------------
 
-// Module-level is correct: exactly one SmokePanel mounts. State is
+// Module-level is correct: exactly one VocPanel mounts. State is
 // independent of the CSI renderer's globals.
 let _stableYCeil = 100;
+let _stableYFloor = 0;
 let _stableYStep = 20;
 
 /** Snap a rough step size to a nice round number. */
@@ -98,15 +97,29 @@ function niceStep(rough: number): number {
   return 10 * mag;
 }
 
-/** Return a stable {yCeil, yStep} pair with hysteresis. */
-function getStableYScale(rawMax: number): { yCeil: number; yStep: number } {
+/**
+ * Return a stable {yCeil, yStep, yFloor} triple with hysteresis on both
+ * bounds, plus a span guard so a constant reading never collapses the axis.
+ */
+function getStableYScale(
+  rawMax: number,
+  rawMin: number,
+): { yCeil: number; yStep: number; yFloor: number } {
   if (rawMax > _stableYCeil || rawMax < _stableYCeil * 0.45) {
     const rough = rawMax / 5;                // target ~5 ticks
     _stableYStep = niceStep(rough);
     _stableYCeil = _stableYStep * Math.ceil(rawMax / _stableYStep);
     if (_stableYCeil < rawMax) _stableYCeil += _stableYStep;
   }
-  return { yCeil: _stableYCeil, yStep: _stableYStep };
+  if (rawMin < _stableYFloor || rawMin > _stableYFloor * 1.2) {
+    _stableYFloor = rawMin;
+  }
+  const span = _stableYCeil - _stableYFloor;
+  const minSpan = Math.max(_stableYCeil * 0.06, 0.5);
+  if (span < minSpan) {
+    _stableYFloor = Math.max(0, _stableYCeil - minSpan);
+  }
+  return { yCeil: _stableYCeil, yStep: _stableYStep, yFloor: _stableYFloor };
 }
 
 /** Format a time offset: "-Ns" under 90 s, else "-Nm". */
@@ -114,23 +127,28 @@ function fmtOffset(sec: number): string {
   return sec < 90 ? `${Math.round(sec)}s` : `${Math.round(sec / 60)}m`;
 }
 
+/** Compact kΩ tick label: integers ≥ 10, one decimal below. */
+function fmtKohm(v: number): string {
+  return v >= 10 ? v.toFixed(0) : v.toFixed(1);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-export interface SmokeChartOptions {
+export interface VocChartOptions {
   buffer: StoredSmokeSample[];
-  yMax: number;    // EMA-derived fallback from getSmokeAutoScaleMax()
-  paused: boolean; // kept for API parity with drawStripChart
+  yMax: number;  // EMA-derived fallback from getGasAutoScaleMax()
+  yMin: number;  // EMA-derived fallback from getGasAutoScaleMin()
   theme: Theme;
-  stale: boolean;  // sensor offline — dim traces + badge
+  stale: boolean;  // sensor offline — dim trace + badge
 }
 
-export function drawSmokeChart(
+export function drawVocChart(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
-  opts: SmokeChartOptions,
+  opts: VocChartOptions,
 ): void {
   const { buffer, theme, stale } = opts;
   const nBuf = buffer.length;
@@ -154,14 +172,15 @@ export function drawSmokeChart(
   const tSpan = Math.max(tMax - tMin, MIN_SPAN_S);
   const xPx = (t: number) => pL + ((t - tMin) / tSpan) * pW;
 
-  // ---- Y scale (0 at bottom, stable nice-number ceiling) ----
-  const rawMax = computeDataMax(buffer, opts.yMax);
-  const { yCeil, yStep } = getStableYScale(rawMax);
-  const nY = Math.round(yCeil / yStep);          // number of tick intervals
+  // ---- Y scale (floor at bottom, stable nice-number ceiling) ----
+  const { rawMax, rawMin } = computeDataRange(buffer, opts.yMax, opts.yMin);
+  const { yCeil, yStep, yFloor } = getStableYScale(rawMax, rawMin);
+  const span = Math.max(yCeil - yFloor, 1e-9);
+  const nY = Math.max(1, Math.round(span / yStep));  // tick intervals
   const traceH = pH * TRACE_FRAC;
   const traceTop = pT + (pH - traceH);
   const traceBot = pB;
-  const yPx = (v: number) => traceBot - (v / yCeil) * traceH;
+  const yPx = (v: number) => traceBot - ((v - yFloor) / span) * traceH;
 
   // ---- horizontal grid ----
   ctx.strokeStyle = C.grid;
@@ -174,8 +193,8 @@ export function drawSmokeChart(
     ctx.stroke();
   }
 
-  // ---- zero baseline ----
-  ctx.strokeStyle = C.zeroLine;
+  // ---- floor baseline ----
+  ctx.strokeStyle = C.baseLine;
   ctx.lineWidth = 1.0;
   ctx.beginPath();
   ctx.moveTo(pL, traceBot);
@@ -206,15 +225,15 @@ export function drawSmokeChart(
     ctx.stroke();
   }
 
-  // ---- series lines / empty state ----
+  // ---- series line / empty state ----
   if (nBuf > 0) {
-    drawSeries(ctx, buffer, SERIES_KEYS, xPx, yPx, pL, pR, traceTop, traceBot, theme, stale);
+    drawGasSeries(ctx, buffer, xPx, yPx, pL, pR, traceTop, traceBot, theme, stale);
   } else {
     ctx.fillStyle = C.inkMuted;
     ctx.font = '13px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('Waiting for air-quality data…', (pL + pR) / 2, (pT + pB) / 2);
+    ctx.fillText('Waiting for VOC data…', (pL + pR) / 2, (pT + pB) / 2);
   }
 
   // ---- X-axis time labels ----
@@ -232,14 +251,13 @@ export function drawSmokeChart(
     ctx.fillText(label, x, pB + 7);
   }
 
-  // ---- Y-axis ticks (µg/m³) ----
+  // ---- Y-axis ticks (kΩ) ----
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   for (let i = 0; i <= nY; i++) {
-    const val = yStep * i;
+    const val = yFloor + (span / nY) * i;
     const y = traceBot - (i / nY) * traceH;
-    const label = Number.isInteger(val) ? val.toFixed(0) : val.toFixed(1);
-    ctx.fillText(label, pL - 9, y);
+    ctx.fillText(fmtKohm(val), pL - 9, y);
   }
 
   // ---- info line (top-right) ----
@@ -261,13 +279,12 @@ export function drawSmokeChart(
 }
 
 // ---------------------------------------------------------------------------
-// Draw the three PM polylines + direct end-labels
+// Draw the gas polyline + direct end-label
 // ---------------------------------------------------------------------------
 
-function drawSeries(
+function drawGasSeries(
   ctx: CanvasRenderingContext2D,
   buffer: StoredSmokeSample[],
-  keys: readonly (keyof SmokeColors)[],
   xPx: (t: number) => number,
   yPx: (v: number) => number,
   pL: number,
@@ -278,77 +295,62 @@ function drawSeries(
   stale: boolean,
 ): void {
   const nBuf = buffer.length;
-  const colors = SERIES_COLORS[theme];
-
-  // Precompute X positions for every sample (shared across series)
-  const xs = new Float32Array(nBuf);
-  for (let fi = 0; fi < nBuf; fi++) {
-    xs[fi] = xPx(buffer[fi].t);
-  }
 
   ctx.lineWidth = 2;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.globalAlpha = stale ? 0.35 : 1;
+  ctx.strokeStyle = GAS_COLOR[theme];
 
-  for (const key of keys) {
-    ctx.strokeStyle = colors[key];
-    ctx.beginPath();
-    for (let fi = 0; fi < nBuf; fi++) {
-      const y = yPx(buffer[fi][key]);
-      if (fi === 0) ctx.moveTo(xs[fi], y);
-      else ctx.lineTo(xs[fi], y);
-    }
-    ctx.stroke();
+  // Legacy samples (no BME680) carry undefined gas — skip them rather
+  // than plotting fake zero-spikes.
+  let started = false;
+  ctx.beginPath();
+  for (let fi = 0; fi < nBuf; fi++) {
+    const v = buffer[fi].gas_kohm;
+    if (v === undefined) continue;
+    const x = xPx(buffer[fi].t);
+    const y = yPx(v);
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else { ctx.lineTo(x, y); }
   }
+  if (started) ctx.stroke();
   ctx.globalAlpha = 1;
 
-  // ---- direct end-labels (inkMuted — identity never rides on colour alone) ----
-  const labels: Array<{ key: (typeof keys)[number]; y: number }> = keys.map(
-    (key) => ({ key, y: yPx(buffer[nBuf - 1][key]) }),
-  );
-
+  // ---- direct end-label (inkMuted — identity never rides on colour alone) ----
+  const last = buffer[nBuf - 1];
+  if (!started || last.gas_kohm === undefined) return;
+  const y = Math.min(Math.max(yPx(last.gas_kohm), traceTop + 8), traceBot - 4);
+  ctx.fillStyle = PALETTE[theme].inkMuted;
   ctx.font = '10px monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-
-  const placed: number[] = [];
-  // Draw PM2.5 always; PM10 then PM1.0 only when clear of placed labels.
-  // Values are physically ordered (PM1.0 <= PM2.5 <= PM10), so collisions
-  // only occur when traces nearly coincide.
-  for (const key of ['pm2_5', 'pm10', 'pm1_0'] as const) {
-    const label = labels.find((l) => l.key === key);
-    if (!label) continue;
-    if (placed.some((y) => Math.abs(y - label.y) < 13)) continue;
-    const y = Math.min(Math.max(label.y, traceTop + 8), traceBot - 4);
-    ctx.fillStyle = PALETTE[theme].inkMuted;
-    ctx.fillText(labelText(key), pR - 6, y);
-    placed.push(y);
-  }
-}
-
-function labelText(key: keyof SmokeColors): string {
-  if (key === 'pm1_0') return 'PM1.0';
-  if (key === 'pm2_5') return 'PM2.5';
-  return 'PM10';
+  ctx.fillText(`${last.gas_kohm.toFixed(1)} kΩ`, pR - 6, y);
 }
 
 // ---------------------------------------------------------------------------
 // Auto-scale from the buffer
 // ---------------------------------------------------------------------------
 
-function computeDataMax(
+function computeDataRange(
   buffer: StoredSmokeSample[],
-  fallback: number,
-): number {
-  if (buffer.length === 0) return Math.max(fallback, 1);
-  let mx = 0;
+  fallbackMax: number,
+  fallbackMin: number,
+): { rawMax: number; rawMin: number } {
+  if (buffer.length === 0) {
+    return { rawMax: Math.max(fallbackMax, 1), rawMin: Math.max(0, fallbackMin) };
+  }
+  let mx = -Infinity;
+  let mn = Infinity;
   const fStep = Math.max(1, Math.floor(buffer.length / 40));
   for (let fi = 0; fi < buffer.length; fi += fStep) {
-    const s = buffer[fi];
-    if (s.pm1_0 > mx) mx = s.pm1_0;
-    if (s.pm2_5 > mx) mx = s.pm2_5;
-    if (s.pm10 > mx) mx = s.pm10;
+    const v = buffer[fi].gas_kohm;
+    if (v === undefined) continue;
+    if (v > mx) mx = v;
+    if (v < mn) mn = v;
   }
-  return mx > 0 ? mx * 1.14 : Math.max(fallback, 1);
+  if (!Number.isFinite(mx) || !Number.isFinite(mn)) {
+    return { rawMax: Math.max(fallbackMax, 1), rawMin: Math.max(0, fallbackMin) };
+  }
+  return { rawMax: mx * 1.14, rawMin: mn * 0.86 };
 }

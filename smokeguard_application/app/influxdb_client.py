@@ -196,7 +196,9 @@ class InfluxClient:
         Measurement: smoke_reading
         Tags: none (single fixed sensor — no cardinality benefit)
         Fields: pm1_0, pm2_5, pm10, cnt0_3, cnt0_5, cnt1_0, cnt2_5, cnt5_0,
-                cnt10, rssi
+                cnt10, rssi + BME680 (temp_c, pressure_hpa, humidity_pct,
+                gas_kohm, altitude_m — written only when present, i.e. new
+                firmware)
         Timestamp: timestamp_real (sensor clock or receive-time fallback) in ns
         """
         point = Point("smoke_reading")
@@ -209,6 +211,10 @@ class InfluxClient:
         point.field("cnt2_5", record.cnt2_5)
         point.field("cnt5_0", record.cnt5_0)
         point.field("cnt10", record.cnt10)
+        for name in ("temp_c", "pressure_hpa", "humidity_pct", "gas_kohm", "altitude_m"):
+            value = getattr(record, name)
+            if value is not None:  # InfluxDB rejects None fields
+                point.field(name, value)
         point.field("rssi", record.rssi)
         ts_ns = int(record.timestamp_real * 1_000_000_000)
         point.time(ts_ns)

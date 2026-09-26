@@ -1,7 +1,8 @@
 /**
- * Air-quality (PMS5003) data store — module-level singleton for the 1 Hz
- * smoke path. Same pattern as csiStore: no React re-render per sample;
- * the canvas pulls via rAF, stat tiles update via a coalesced subscription.
+ * Smoke-sensor data store — module-level singleton for the 1 Hz smoke path
+ * (combined PMS5003 + BME680 telemetry, one CSV line per sample). Same
+ * pattern as csiStore: no React re-render per sample; the VOC canvas pulls
+ * via rAF, stat tiles update via a coalesced subscription.
  */
 
 import type { SmokeSample } from '../types';
@@ -21,6 +22,11 @@ export interface StoredSmokeSample {
   cnt2_5: number;
   cnt5_0: number;
   cnt10: number;
+  temp_c: number | undefined;      // BME680 block — undefined on legacy
+  pressure_hpa: number | undefined; // firmware (11-column lines)
+  humidity_pct: number | undefined;
+  gas_kohm: number | undefined;
+  altitude_m: number | undefined;
   rssi: number;
   receivedAt: number;     // performance.now() at receive — drives staleness
 }
@@ -35,21 +41,26 @@ export const MAX_SAMPLES = 600;
 /** Sensor is offline after this many ms without a fresh sample. */
 export const STALE_AFTER_MS = 15_000;
 
-/** µg/m³ floor for the Y axis. */
-const SCALE_FLOOR = 10;
-
 const ring: StoredSmokeSample[] = [];
 let lastSample: StoredSmokeSample | null = null;
 
 // ---------------------------------------------------------------------------
-// Auto-scale (per-series peak-hold)
+// Gas auto-scale (peak-hold ceiling + min-hold floor)
 // ---------------------------------------------------------------------------
 
-// Peak-hold with exponential decay: spikes are caught instantly and the
-// scale decays back to baseline with τ ≈ 3.3 min. The renderer's stable-Y
+// Gas resistance DROPS under VOC exposure (~50–300 kΩ baseline → ~1–5 kΩ),
+// so a 0-anchored peak-hold scale would hide the event. Both bounds use
+// exponential hold with τ ≈ 3.3 min: the ceiling decays down and the floor
+// drifts up, so a fresh drop re-opens the window. The renderer's stable-Y
 // hysteresis removes residual tick vibration.
 const DECAY = 0.995;
-const emaMax = { pm1_0: SCALE_FLOOR, pm2_5: SCALE_FLOOR, pm10: SCALE_FLOOR };
+const DECAY_UP = 1 / DECAY;  // ≈ 1.005 — min-hold drifts upward at the same τ
+
+/** kΩ floor for the gas Y ceiling (gas can legitimately read below 1 kΩ). */
+const GAS_SCALE_FLOOR = 1;
+
+let gasEmaMax = GAS_SCALE_FLOOR;
+let gasEmaMin = Number.POSITIVE_INFINITY;  // stays ∞ until the first gas sample
 
 // ---------------------------------------------------------------------------
 // Subscribers
@@ -80,6 +91,11 @@ export function pushSmokeSample(msg: SmokeSample): void {
     cnt2_5: msg.cnt2_5,
     cnt5_0: msg.cnt5_0,
     cnt10: msg.cnt10,
+    temp_c: msg.temp_c,
+    pressure_hpa: msg.pressure_hpa,
+    humidity_pct: msg.humidity_pct,
+    gas_kohm: msg.gas_kohm,
+    altitude_m: msg.altitude_m,
     rssi: msg.rssi,
     receivedAt: performance.now(),
   };
@@ -88,9 +104,10 @@ export function pushSmokeSample(msg: SmokeSample): void {
   if (ring.length > MAX_SAMPLES) ring.shift();
   lastSample = s;
 
-  emaMax.pm1_0 = Math.max(emaMax.pm1_0 * DECAY, s.pm1_0);
-  emaMax.pm2_5 = Math.max(emaMax.pm2_5 * DECAY, s.pm2_5);
-  emaMax.pm10 = Math.max(emaMax.pm10 * DECAY, s.pm10);
+  if (s.gas_kohm !== undefined) {
+    gasEmaMax = Math.max(gasEmaMax * DECAY, s.gas_kohm);
+    gasEmaMin = Math.min(gasEmaMin * DECAY_UP, s.gas_kohm);
+  }
 
   // Coalesce notifications into one rAF tick
   if (!rafScheduled) {
@@ -118,9 +135,16 @@ export function getSmokeSamples(): readonly StoredSmokeSample[] {
   return ring;
 }
 
-export function getSmokeAutoScaleMax(): number {
-  const m = Math.max(emaMax.pm1_0, emaMax.pm2_5, emaMax.pm10) * 1.15;
-  return m < SCALE_FLOOR ? SCALE_FLOOR : m;
+/** Gas Y-axis ceiling: EMA peak-hold with headroom, floored at 1 kΩ. */
+export function getGasAutoScaleMax(): number {
+  const m = gasEmaMax * 1.15;
+  return m < GAS_SCALE_FLOOR ? GAS_SCALE_FLOOR : m;
+}
+
+/** Gas Y-axis floor: EMA min-hold with headroom (0 before any gas data). */
+export function getGasAutoScaleMin(): number {
+  if (!Number.isFinite(gasEmaMin)) return 0;
+  return Math.max(0, gasEmaMin * 0.7);
 }
 
 // ---------------------------------------------------------------------------

@@ -118,7 +118,7 @@ export default function StripChart({ theme }: Props) {
   return (
     <div className="strip-chart">
       <div className="sc-toolbar">
-        <span className="sc-title">CSI Subcarrier Amplitude</span>
+        <span className="sc-title">Channel State Information (CSI)</span>
         <div className="sc-controls">
           <label className="sc-toggle">
             <input
