@@ -157,9 +157,11 @@ class CSIRecord(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SmokeRecord(BaseModel):
-    """A single PMS5003 air-quality reading parsed from the smoke MQTT topic.
+    """A single PMS5003 + BME680 air-quality reading parsed from the smoke MQTT topic.
 
-    CSV: timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi
+    CSV (16 fields): timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,
+    cnt5_0,cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,altitude_m,rssi
+    Legacy firmware sends 11 fields (no BME680) — those fields are None.
     """
 
     timestamp_real: float = Field(
@@ -174,6 +176,11 @@ class SmokeRecord(BaseModel):
     cnt2_5: int
     cnt5_0: int
     cnt10: int
+    temp_c: float | None = None
+    pressure_hpa: float | None = None
+    humidity_pct: float | None = None
+    gas_kohm: float | None = None
+    altitude_m: float | None = None
     rssi: int
 
 
@@ -217,7 +224,11 @@ class WSCsiData(WSMessage):
 
 
 class WSSmokeData(WSMessage):
-    """Air-quality reading broadcast to all connected clients."""
+    """Air-quality reading broadcast to all connected clients.
+
+    BME680 fields are omitted from the JSON when absent (legacy firmware);
+    see the exclude_none=True dump in main.py.
+    """
 
     type: Literal["smoke"] = "smoke"  # type: ignore[assignment]
     t: float
@@ -230,6 +241,11 @@ class WSSmokeData(WSMessage):
     cnt2_5: int
     cnt5_0: int
     cnt10: int
+    temp_c: float | None = None
+    pressure_hpa: float | None = None
+    humidity_pct: float | None = None
+    gas_kohm: float | None = None
+    altitude_m: float | None = None
     rssi: int
 
 

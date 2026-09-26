@@ -70,15 +70,19 @@ Key design decisions:
 - WebSocket broadcast uses pre-serialized JSON (one `json.dumps` per message, not per client).
 - Per-client bounded queues drop oldest messages when full — slow clients never stall the 100 Hz pipeline.
 - InfluxDB writes use the official client's background batching thread (`batch_size=500`, `flush_interval=1000ms`).
-- A periodic cleanup task (`cleanup_old_readings` in `main.py`) deletes readings older than `csi_retention_days` (default 7 days) via InfluxDB's delete API — first run 60 s after startup, then every `cleanup_interval_hours` (default 0.5 h = 30 min). Export CSVs (`scripts/export_influx_to_csv.py`) before the window expires; deleted points are unrecoverable.
+- A periodic cleanup task (`cleanup_old_readings` in `main.py`) deletes readings older than `csi_retention_days` (default 7 days) via InfluxDB's delete API — first run 60 s after startup, then every `cleanup_interval_hours` (default 0.5 h = 30 min). Export CSVs (`scripts/export_csi_data_to_csv.py` for CSI, `scripts/export_smoke_sensor_data_to_csv.py` for smoke — same `--out/--limit/--start/--stop` CLI) before the window expires; deleted points are unrecoverable.
 
 ### CSI parsing (`app/mqtt_reader.py`)
 
 Two input modes:
-- **MQTT mode** (default): subscribes to `home/csi/data` (QoS 0), `home/csi/status` (QoS 1), and `home/smoke_sensor/data` (QoS 0, PMS5003 air-quality sensor). Each data payload is one CSV line; retained data messages are skipped. Status JSON updates `receiver_online` / `ntp_synced` (the retained LWT `{"state":"offline"}` marks the receiver dead).
+- **MQTT mode** (default): subscribes to `home/csi/data` (QoS 0), `home/csi/status` (QoS 1), and `home/smoke_sensor/data` (QoS 0, PMS5003 + BME680 air-quality sensor). Each data payload is one CSV line; retained data messages are skipped. Status JSON updates `receiver_online` / `ntp_synced` (the retained LWT `{"state":"offline"}` marks the receiver dead).
 - **Replay mode**: when `REPLAY_CSV` is set to a `.csv` path, reads the CSV file directly. Pre-parsed rows are passed to `_process_row()` to avoid re-splitting the quoted JSON `data` column. Replays CSI only — smoke data requires live MQTT.
 
-Smoke CSV format (11 fields, no header): `timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi` — `_process_smoke_line()` parses it into a `SmokeRecord`. `timestamp` is UNIX epoch seconds; 0/negative (NTP unsynced) falls back to server receive time, mirroring the CSI fallback. Malformed lines bump `dropped_lines`.
+Smoke CSV format (no header) — `_process_smoke_line()` parses it into a `SmokeRecord`:
+- **16 fields** (current firmware): `timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,altitude_m,rssi` — the BME680 block (cols 10–14) is parsed as floats.
+- **11 fields** (legacy firmware, still accepted): the same without the BME680 block — those fields stay `None` and are omitted from WS JSON (`exclude_none=True`) and InfluxDB.
+
+`timestamp` is UNIX epoch seconds; 0/negative (NTP unsynced) falls back to server receive time, mirroring the CSI fallback. Malformed lines bump `dropped_lines`.
 
 Two format variants detected by field count:
 - **ESP32-S3** (25/26 columns): `local_timestamp` at index 18, `data` at index 24 (or -2 with `timestamp_real` appended).
@@ -99,9 +103,9 @@ For unknown lengths (LLTF mode with ~50–57 subcarriers, or other custom modes)
 - **Queries**: Flux with `pivot(rowKey: ["_time"], columnKey: ["_field"])` to reconstruct wide rows, then `_execute_history_query` rebuilds `i`/`q` arrays from column names.
 
 Second measurement written by `write_smoke()`:
-- **Measurement**: `smoke_reading` (PMS5003 air-quality)
+- **Measurement**: `smoke_reading` (PMS5003 + BME680 air-quality)
 - **Tags**: none (single fixed sensor)
-- **Fields**: `pm1_0`, `pm2_5`, `pm10`, `cnt0_3`, `cnt0_5`, `cnt1_0`, `cnt2_5`, `cnt5_0`, `cnt10`, `rssi`
+- **Fields**: `pm1_0`, `pm2_5`, `pm10`, `cnt0_3`, `cnt0_5`, `cnt1_0`, `cnt2_5`, `cnt5_0`, `cnt10`, `rssi` + BME680 floats `temp_c`, `pressure_hpa`, `humidity_pct`, `gas_kohm`, `altitude_m` (written only when present — legacy 11-field lines have none)
 - **Timestamp**: sensor `timestamp_real` (receive-time fallback) in nanosecond precision.
 - Excluded from the 7-day CSI cleanup (the delete predicate is `_measurement="csi_reading"` only); the bucket's 30-day retention governs it.
 
@@ -118,7 +122,8 @@ Server → client at `GET /ws`:
               "subcarrier_index_offset": 32}}
 {"type": "smoke", "t": 1727090000.0, "pm1_0": 7, "pm2_5": 15, "pm10": 22,
  "cnt0_3": 1800, "cnt0_5": 600, "cnt1_0": 200, "cnt2_5": 90, "cnt5_0": 30,
- "cnt10": 4, "rssi": -52}
+ "cnt10": 4, "temp_c": 27.34, "pressure_hpa": 998.2, "humidity_pct": 48.5,
+ "gas_kohm": 120.4, "altitude_m": 45.2, "rssi": -52}
 {"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
  "receiver_online": true, "ntp_synced": true, ...}
 {"type": "pong"}
@@ -198,7 +203,7 @@ curl -fsSL "https://dl.influxdata.com/influxdb/releases/influxdb2-client-2.7.5-l
 
 ## React Frontend
 
-The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that visualizes the live CSI amplitude stream as a **pulse-monitor style strip chart** (scrolling time-series, one polyline per subcarrier), with a bottom **air-quality panel** showing the PMS5003 PM1.0/PM2.5/PM10 strip chart plus a stat rail (PM2.5/PM10 headline tiles, particle counts, RSSI). Includes a dashboard layout with sidebar metrics, rotating smoking trivia (sourced from Wikipedia), light/dark theme toggle, and a placeholder for the future detection model.
+The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that visualizes the live CSI amplitude stream as a **pulse-monitor style strip chart** (scrolling time-series, one polyline per subcarrier), with a bottom row split into two panels: **Volatile Organic Compounds (VOC)** on the left (BME680 gas-resistance strip chart + temperature/pressure/humidity/altitude tiles) and **Air Quality** on the right (PMS5003 as numbers only — PM1.0/PM2.5/PM10 hero tiles, particle counts, RSSI — mirroring real-world AQ monitors). Includes a dashboard layout with sidebar metrics and rotating smoking trivia (sourced from Wikipedia), and a light/dark theme toggle.
 
 ### Quick Start
 
@@ -217,14 +222,17 @@ cd frontend && npm run dev
 cd frontend && npm run build   # → dist/
 ```
 
-### Architecture (14 source files)
+### Architecture (15 source files)
 
 - **100 Hz data path**: CSI frames arrive via WebSocket → parsed → `csiStore.pushFrame()` computes amplitude (`sqrt(I²+Q²)`) and pushes into a module-level ring buffer (max 600 frames, ~6 s at 100 Hz). No React re-renders per frame.
 - **Canvas at 60 fps**: `StripChart` (exported from `WaterfallChart.tsx`) runs its own `requestAnimationFrame` loop, pulling the latest frame from the store, maintaining a 600-frame ring buffer, and calling the pure render function `drawStripChart()`.
 - **React at ~5 Hz**: Sidebar metrics tiles (RSSI, noise floor, packet count, pkts/s) and WS connection badge use React state, updated via a throttled `setInterval`.
 - **Strip chart** (`src/renderers/drawStripChart.ts`): X-axis = elapsed time (newest at right), Y-axis = amplitude (0 at bottom, stable nice-number ticks with hysteresis). Each subcarrier is a coloured polyline — spectral gradient (blue → red), data subcarriers vibrant, guard bands muted, DC null as a gray dashed line. Theme-aware (light/dark palettes). Non-data subcarriers are visually distinguished.
-- **Air-quality panel** (bottom of `main`): 1 Hz smoke samples arrive via WebSocket → `smokeStore.pushSmokeSample()` (600-sample ring, ~10 min; per-series peak-hold auto-scale; QoS-0 dedupe via monotonic `t` guard; staleness from `performance.now()` — `STALE_AFTER_MS` = 15 s). `SmokePanel` runs its own rAF loop calling `drawSmokeChart()`; stat tiles update via the store's rAF-coalesced subscription. Series palette (validated CVD-safe hexes, see `drawSmokeChart.ts` header comment) + HTML legend in the toolbar; stat rail doubles as the table view. Sensor offline → tiles dim + `SENSOR OFFLINE` badge.
-- **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card, model placeholder), main chart area (CSI chart on top, air-quality panel below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
+- **Bottom sensor panels** (bottom of `main`, in a `.bottom-panels` flex row): 1 Hz smoke samples (combined PMS5003 + BME680, one CSV line each) arrive via WebSocket → `smokeStore.pushSmokeSample()` (600-sample ring, ~10 min; QoS-0 dedupe via monotonic `t` guard; staleness from `performance.now()` — `STALE_AFTER_MS` = 15 s).
+  - **VOC panel** (`VocPanel.tsx`, left): rAF loop calling `drawVocChart()` — single-series gas-resistance (kΩ) chart. Gas *drops* under VOC exposure, so the Y scale uses an EMA peak-hold ceiling **plus a min-hold floor** (see `getGasAutoScaleMax/Min()` in the store) with a span guard. Temperature/pressure/humidity/altitude render as stat tiles via the store's rAF-coalesced subscription; legacy firmware (no BME680 block) leaves the chart in its empty state — samples with `gas_kohm === undefined` are never plotted. Validated CVD-safe series colour (see `drawVocChart.ts` header comment); direct end-label carries the current value.
+  - **Air Quality panel** (`AirQualityPanel.tsx`, right): numbers only, no chart — PM1.0/PM2.5/PM10 hero tiles, "Particles / 0.1 L" count grid, RSSI. Tiles update via the rAF-coalesced subscription.
+  - Sensor offline → both panels dim + `SENSOR OFFLINE` badge / stale note.
+- **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card), main chart area (CSI chart on top, bottom-panels row below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
 - **Trivia** (`src/hooks/useSmokingFacts.ts`): Fetches intro extracts from 15 Wikipedia smoking-related articles on first load, parses into sentences, combines with 30 hand-picked fallback facts, and caches in `localStorage` for 24 hours. Rotates every 8 seconds in the sidebar.
 - **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore` and `smoke` messages to `smokeStore`.
 - **No charting libraries, no state management libraries** — pure Canvas 2D API rendering.
@@ -234,15 +242,16 @@ cd frontend && npm run build   # → dist/
 | File | Purpose |
 |------|---------|
 | `src/store/csiStore.ts` | Module-level singleton — 600-frame ring buffer, amplitude precomputation, EMA auto-scale, frame/metrics subscribers |
-| `src/store/smokeStore.ts` | Module-level singleton for the 1 Hz smoke path — 600-sample ring, peak-hold auto-scale, dedupe, staleness, rAF-coalesced subscribers |
+| `src/store/smokeStore.ts` | Module-level singleton for the 1 Hz smoke path — 600-sample ring (combined PMS5003 + BME680), gas min-hold/peak-hold auto-scale, dedupe, staleness, rAF-coalesced subscribers |
 | `src/hooks/useWebSocket.ts` | WS lifecycle, reconnect with backoff, heartbeat, message→store dispatch |
 | `src/hooks/useSmokingFacts.ts` | Fetches smoking facts from Wikipedia API, caches in localStorage for 24h, falls back to 30 hardcoded facts |
 | `src/renderers/drawStripChart.ts` | Strip-chart renderer — per-subcarrier polylines over time, theme-aware light/dark palettes, stable Y-axis ticks with hysteresis, non-data subcarrier suppression |
-| `src/renderers/drawSmokeChart.ts` | Air-quality renderer — 3 PM series (one µg/m³ Y axis), validated CVD-safe series colors, direct end-labels, offline badge; exports `SERIES_COLORS` for the HTML legend |
+| `src/renderers/drawVocChart.ts` | VOC renderer — single gas-resistance series (kΩ), stable ceiling + floor hysteresis, validated CVD-safe series color, direct end-label, offline badge |
 | `src/renderers/drawWaterfall.ts` | (Orphaned) Original 3-D perspective waterfall renderer — kept for reference, not imported by any component |
 | `src/components/WaterfallChart.tsx` | Canvas component (exports `StripChart`) — rAF loop, 600-frame buffer, pause toggle, DPR-aware canvas sizing, accepts `theme` prop |
-| `src/components/SmokePanel.tsx` | Bottom air-quality panel — rAF canvas (PM1.0/PM2.5/PM10), stat rail (PM2.5/PM10 hero tiles, particle counts, RSSI), staleness dimming, pause toggle |
-| `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia, model placeholder), main chart + air-quality panel, footer |
+| `src/components/VocPanel.tsx` | Bottom-left VOC panel — rAF canvas (gas resistance), environmental stat tiles (temp/pressure/humidity/altitude), staleness dimming, pause toggle |
+| `src/components/AirQualityPanel.tsx` | Bottom-right air-quality panel — numbers only: PM1.0/PM2.5/PM10 hero tiles, particle counts, RSSI, staleness dimming + offline badge |
+| `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia), main chart + bottom sensor panels, footer |
 | `src/types.ts` | `CsiFrame`, `SmokeSample`, `WsMessage`, `SubcarrierMetadata`, `MetricsSnapshot` |
 
 ### Theme System

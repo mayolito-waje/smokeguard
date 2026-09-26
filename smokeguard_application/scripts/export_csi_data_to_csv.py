@@ -10,9 +10,9 @@ Not stored in InfluxDB (reconstructed as constants):
   - local_timestamp -> 0 (only timestamp_real is persisted)
 
 Usage:
-    uv run python scripts/export_influx_to_csv.py                 # all data
-    uv run python scripts/export_influx_to_csv.py --limit 500     # latest 500
-    uv run python scripts/export_influx_to_csv.py \
+    uv run python scripts/export_csi_data_to_csv.py                 # all data
+    uv run python scripts/export_csi_data_to_csv.py --limit 500     # latest 500
+    uv run python scripts/export_csi_data_to_csv.py \
         --start 2026-08-21T00:00:00Z --stop 2026-08-21T01:00:00Z
 """
 
@@ -51,8 +51,8 @@ def as_int(value) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="sample_csv_output/influx_export.csv",
-                        help="Output CSV path (default: sample_csv_output/influx_export.csv)")
+    parser.add_argument("--out", default="sample_csv_output/csi_data.csv",
+                        help="Output CSV path (default: sample_csv_output/csi_data.csv)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Max number of rows to export (0 = all)")
     parser.add_argument("--start", default="-30d",

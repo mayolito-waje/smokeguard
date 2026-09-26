@@ -139,7 +139,9 @@ def create_app() -> FastAPI:
                 if influx and influx.connected:
                     influx.write_smoke(record)
 
-                # Broadcast to WebSocket clients
+                # Broadcast to WebSocket clients. exclude_none keeps the JSON
+                # keys stable for the frontend while omitting BME680 fields
+                # that legacy firmware doesn't send.
                 if ws_manager and ws_manager.client_count > 0:
                     ws_msg = WSSmokeData(
                         t=record.timestamp_real,
@@ -152,9 +154,14 @@ def create_app() -> FastAPI:
                         cnt2_5=record.cnt2_5,
                         cnt5_0=record.cnt5_0,
                         cnt10=record.cnt10,
+                        temp_c=record.temp_c,
+                        pressure_hpa=record.pressure_hpa,
+                        humidity_pct=record.humidity_pct,
+                        gas_kohm=record.gas_kohm,
+                        altitude_m=record.altitude_m,
                         rssi=record.rssi,
                     )
-                    await ws_manager.broadcast_sync(ws_msg.model_dump())
+                    await ws_manager.broadcast_sync(ws_msg.model_dump(exclude_none=True))
 
         smoke_consumer_task = asyncio.create_task(consume_smoke_queue())
 

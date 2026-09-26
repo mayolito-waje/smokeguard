@@ -13,8 +13,10 @@ Key features:
   estimation from the ESP32's microsecond counter (incl. 32-bit wraparound)
 - Also subscribes to the status topic to track receiver online / NTP-sync
   state (single-receiver setup assumed — later heartbeats overwrite)
-- The smoke topic carries PMS5003 CSV lines (timestamp,pm1_0,...,rssi);
-  a 0/negative timestamp falls back to receive time, same as CSI
+- The smoke topic carries PMS5003 + BME680 CSV lines (timestamp,pm1_0,...,
+  cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,altitude_m,rssi; legacy
+  firmware sends 11 fields without the BME680 block); a 0/negative timestamp
+  falls back to receive time, same as CSI
 - Auto-reconnect via paho's built-in exponential backoff
 - Replay mode: reads from a .csv file when replay_csv is set (CSI only)
 """
@@ -469,11 +471,14 @@ class CsiMqttReader:
     # ------------------------------------------------------------------
 
     def _process_smoke_line(self, line: str) -> None:
-        """Parse one PMS5003 CSV line into a SmokeRecord and push to the queue.
+        """Parse one PMS5003 + BME680 CSV line into a SmokeRecord and push to the queue.
 
-        CSV: timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,rssi
-        (no header). timestamp is UNIX epoch seconds; 0 (NTP unsynced) falls
-        back to receive time, mirroring the CSI timestamp_real fallback.
+        CSV (16 fields): timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,
+        cnt2_5,cnt5_0,cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,
+        altitude_m,rssi (no header). Legacy firmware sends 11 fields (no
+        BME680) — those fields stay None. timestamp is UNIX epoch seconds;
+        0 (NTP unsynced) falls back to receive time, mirroring the CSI
+        timestamp_real fallback.
         """
         try:
             reader = csv.reader(StringIO(line))
@@ -482,15 +487,23 @@ class CsiMqttReader:
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
 
-        if len(row) != 11:
-            logger.debug("Smoke line field count %d (expected 11), skipping",
+        if len(row) not in (11, 16):
+            logger.debug("Smoke line field count %d (expected 11 or 16), skipping",
                          len(row))
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
 
         try:
             ts = float(row[0])
-            values = [int(v) for v in row[1:]]
+            ints = [int(v) for v in row[1:10]]  # pm1_0 .. cnt10
+            if len(row) == 16:
+                temp_c, pressure_hpa, humidity_pct, gas_kohm, altitude_m = (
+                    float(v) for v in row[10:15]
+                )
+                rssi = int(row[15])
+            else:
+                temp_c = pressure_hpa = humidity_pct = gas_kohm = altitude_m = None
+                rssi = int(row[10])
         except ValueError:
             logger.debug("Smoke line has non-numeric fields, skipping: %r",
                          line[:80])
@@ -503,16 +516,21 @@ class CsiMqttReader:
 
         record = SmokeRecord(
             timestamp_real=timestamp_real,
-            pm1_0=values[0],
-            pm2_5=values[1],
-            pm10=values[2],
-            cnt0_3=values[3],
-            cnt0_5=values[4],
-            cnt1_0=values[5],
-            cnt2_5=values[6],
-            cnt5_0=values[7],
-            cnt10=values[8],
-            rssi=values[9],
+            pm1_0=ints[0],
+            pm2_5=ints[1],
+            pm10=ints[2],
+            cnt0_3=ints[3],
+            cnt0_5=ints[4],
+            cnt1_0=ints[5],
+            cnt2_5=ints[6],
+            cnt5_0=ints[7],
+            cnt10=ints[8],
+            temp_c=temp_c,
+            pressure_hpa=pressure_hpa,
+            humidity_pct=humidity_pct,
+            gas_kohm=gas_kohm,
+            altitude_m=altitude_m,
+            rssi=rssi,
         )
 
         self._loop.call_soon_threadsafe(self._safe_smoke_enqueue, record)

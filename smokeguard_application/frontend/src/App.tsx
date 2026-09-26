@@ -5,7 +5,8 @@ import { onMetrics, getMetrics } from './store/csiStore';
 import type { MetricsSnapshot } from './types';
 import type { Theme } from './renderers/drawStripChart';
 import StripChart from './components/WaterfallChart';
-import SmokePanel from './components/SmokePanel';
+import VocPanel from './components/VocPanel';
+import AirQualityPanel from './components/AirQualityPanel';
 import './App.css';
 
 // ---------------------------------------------------------------------------
@@ -140,24 +141,15 @@ export default function App() {
             </div>
             <p className="trivia-text" key={factIdx}>{currentFact}</p>
           </div>
-
-          {/* Detection model placeholder */}
-          <div className="card card-model">
-            <div className="card-header">&#x1F916; Detection Model</div>
-            <div className="model-status">
-              <span className="model-dot" />
-              <span>No model loaded</span>
-            </div>
-            <p className="model-hint">
-              Train a classifier on CSI signatures of smoking gestures to enable real-time alerts.
-            </p>
-          </div>
         </aside>
 
-        {/* ---- Main chart ---- */}
+        {/* ---- Main chart + bottom sensor panels ---- */}
         <main className="main">
           <StripChart theme={theme} />
-          <SmokePanel theme={theme} />
+          <div className="bottom-panels">
+            <VocPanel theme={theme} />
+            <AirQualityPanel />
+          </div>
         </main>
       </div>
 

@@ -60,6 +60,13 @@ export interface SmokeSample {
   cnt2_5: number;
   cnt5_0: number;
   cnt10: number;
+  // BME680 block — omitted by the backend when legacy firmware sends
+  // 11-column lines (exclude_none), so these are optional
+  temp_c?: number;
+  pressure_hpa?: number;
+  humidity_pct?: number;
+  gas_kohm?: number;
+  altitude_m?: number;
   rssi: number;
 }
 
