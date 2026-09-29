@@ -3,10 +3,10 @@
  *
  * X-axis = elapsed time (newest packet at the right edge).
  * Y-axis = amplitude (auto-scaled from data subcarriers).
- * Each subcarrier is its own coloured polyline.
+ * Each data subcarrier is its own coloured polyline.
  *
- * Data subcarriers are drawn with vibrant spectral colours.
- * Guard bands are muted; the DC null is a gray dashed line.
+ * Guard bands and the DC null are always zero, so they are skipped
+ * entirely — only data subcarriers are drawn.
  */
 
 import type { SubcarrierMetadata } from '../types';
@@ -34,7 +34,6 @@ interface ChartColors {
   zeroLine: string;
   inkMuted: string;
   nowLine: string;
-  dcLine: string;
 }
 
 const PALETTE: Record<Theme, ChartColors> = {
@@ -44,7 +43,6 @@ const PALETTE: Record<Theme, ChartColors> = {
     zeroLine:  'rgba(255,255,255,0.20)',
     inkMuted:  '#6b6b66',
     nowLine:   'rgba(255,255,255,0.10)',
-    dcLine:    'rgba(180,180,180,0.48)',
   },
   light: {
     bg:        '#f8faf8',
@@ -52,7 +50,6 @@ const PALETTE: Record<Theme, ChartColors> = {
     zeroLine:  'rgba(0,0,0,0.12)',
     inkMuted:  '#8899a6',
     nowLine:   'rgba(0,0,0,0.08)',
-    dcLine:    'rgba(120,120,120,0.50)',
   },
 };
 
@@ -109,22 +106,11 @@ function buildDataMask(
 // Subcarrier line colour
 // ---------------------------------------------------------------------------
 
-function lineColor(
-  j: number,
-  numSub: number,
-  isData: boolean,
-  isDcNull: boolean,
-  dcLine: string,
-): string {
-  if (isDcNull) return dcLine;
-
-  const t = j / Math.max(1, numSub - 1);       // 0 … 1
+/** Spectral colour, mapped across the data subcarriers only. */
+function lineColor(j: number, dataStart: number, dataEnd: number): string {
+  const t = (j - dataStart) / Math.max(1, dataEnd - dataStart); // 0 … 1
   const hue = 225 - t * 218;                    // 225° (blue) → 7° (red)
-
-  if (isData) {
-    return `hsla(${hue.toFixed(0)}, 68%, 56%, 0.80)`;
-  }
-  return `hsla(${hue.toFixed(0)}, 26%, 70%, 0.28)`;
+  return `hsla(${hue.toFixed(0)}, 68%, 56%, 0.80)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +152,8 @@ export function drawStripChart(
   const numSub = nBuf > 0 ? buffer[0].amp.length : 64;
   const meta = nBuf > 0 ? buffer[0].metadata : null;
   const isData = buildDataMask(numSub, meta);
-  const dcNullIdx = meta?.dc_null_idx ?? Math.floor(numSub / 2);
+  const dataStart = meta?.data_start_idx ?? 0;
+  const dataEnd = meta && meta.data_upper_end >= 0 ? meta.data_upper_end : numSub - 1;
 
   // ---- time axis ----
   const tMin = nBuf > 0 ? buffer[0].t : 0;
@@ -228,7 +215,7 @@ export function drawStripChart(
 
   // ---- subcarrier lines ----
   if (nBuf > 0) {
-    drawSubcarrierLines(ctx, buffer, numSub, isData, dcNullIdx, xPx, yPx, C.dcLine);
+    drawSubcarrierLines(ctx, buffer, numSub, isData, dataStart, dataEnd, xPx, yPx);
   } else {
     ctx.fillStyle = C.inkMuted;
     ctx.font = '13px monospace';
@@ -283,10 +270,10 @@ function drawSubcarrierLines(
   buffer: StoredFrame[],
   numSub: number,
   isData: boolean[],
-  dcNullIdx: number,
+  dataStart: number,
+  dataEnd: number,
   xPx: (t: number) => number,
   yPx: (amp: number) => number,
-  dcLine: string,
 ): void {
   const nBuf = buffer.length;
 
@@ -296,28 +283,14 @@ function drawSubcarrierLines(
     xs[fi] = xPx(buffer[fi].t);
   }
 
-  // Draw data subcarriers first (behind), then non-data, then DC null on top
-  const order: Array<{ j: number; isData: boolean; isDc: boolean }> = [];
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 0.42;
+
   for (let j = 0; j < numSub; j++) {
-    order.push({ j, isData: isData[j], isDc: j === dcNullIdx });
-  }
-  // Sort: data first (z=-1), guard (z=0), DC null last (z=1)
-  order.sort((a, b) => {
-    const az = a.isDc ? 1 : a.isData ? -1 : 0;
-    const bz = b.isDc ? 1 : b.isData ? -1 : 0;
-    return az - bz;
-  });
+    // Guard bands and the DC null are always zero — skip them.
+    if (!isData[j]) continue;
 
-  for (const { j, isData: d, isDc } of order) {
-    const color = lineColor(j, numSub, d, isDc, dcLine);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = isDc ? 0.9 : d ? 0.42 : 0.22;
-    ctx.lineJoin = 'round';
-
-    if (isDc) {
-      ctx.setLineDash([6, 4]);
-      ctx.lineWidth = 0.8;
-    }
+    ctx.strokeStyle = lineColor(j, dataStart, dataEnd);
 
     // Build and stroke the full polyline in one go
     ctx.beginPath();
@@ -328,8 +301,6 @@ function drawSubcarrierLines(
       else ctx.lineTo(xs[fi], y);
     }
     ctx.stroke();
-
-    if (isDc) ctx.setLineDash([]);
   }
 }
 

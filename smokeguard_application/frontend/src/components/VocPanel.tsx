@@ -200,6 +200,13 @@ export default function VocPanel({ theme }: Props) {
                 <small> m</small>
               </span>
             </div>
+            <div className="voc-tile voc-tile-gas">
+              <span className="voc-tile-label">Gas Resistance</span>
+              <span className="voc-tile-value">
+                {fmtEnv(sample?.gas_kohm)}
+                <small> kΩ</small>
+              </span>
+            </div>
           </div>
           <div className="voc-stale-note">
             {ageSec === null ? 'No data yet' : `Last sample ${ageSec}s ago`}
