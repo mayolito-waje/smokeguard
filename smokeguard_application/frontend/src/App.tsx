@@ -79,8 +79,7 @@ export default function App() {
       {/* ================================================================ */}
       <header className="header">
         <div className="header-brand">
-          <span className="brand-icon">&#x1F525;</span>
-          <span className="brand-name">SmokeGuard</span>
+          <img className="brand-logo" src="/smokeguard_logo.png" alt="SmokeGuard" />
           <span className="brand-sub">CSI Monitor</span>
         </div>
 

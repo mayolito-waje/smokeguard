@@ -91,20 +91,18 @@ body,
 
 .header-brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
 
-.brand-icon {
-  font-size: 18px;
-  line-height: 1;
+.brand-logo {
+  height: 40px;
+  width: auto;
+  display: block;
 }
 
-.brand-name {
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--accent);
+[data-theme="dark"] .brand-logo {
+  filter: brightness(1.4) saturate(1.05);
 }
 
 .brand-sub {
