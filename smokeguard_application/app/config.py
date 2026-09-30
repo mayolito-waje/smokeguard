@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # WebSocket per-client queue size (oldest dropped when full)
     ws_queue_maxsize: int = 256
 
+    # Smoking-activity detection (dummy until the real models exist)
+    detection_db_path: str = "./detection.db"
+    detection_csi_seconds: float = 7.0    # CSI window snapshotted at detection time
+    detection_smoke_seconds: float = 17.0  # smoke/VOC window snapshotted at detection time
+    dummy_trigger_min_s: float = 30.0      # dummy detector fires at random intervals
+    dummy_trigger_max_s: float = 120.0     # in this range, when enabled
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

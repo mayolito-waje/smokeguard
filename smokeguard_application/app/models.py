@@ -191,7 +191,7 @@ class SmokeRecord(BaseModel):
 class WSMessage(BaseModel):
     """Envelope for WebSocket messages sent to the React frontend."""
 
-    type: Literal["welcome", "csi", "smoke", "status", "pong"]
+    type: Literal["welcome", "csi", "smoke", "status", "pong", "alert"]
 
 
 class WSWelcome(WSMessage):
@@ -262,6 +262,14 @@ class WSStatus(WSMessage):
     ntp_synced: bool | None = None
 
 
+class WSAlert(WSMessage):
+    """Broadcast when a smoking activity is detected (toast trigger)."""
+
+    type: Literal["alert"] = "alert"  # type: ignore[assignment]
+    id: int = Field(description="Detection event id in the SQLite store")
+    detected_at: float = Field(description="Detection UNIX epoch seconds")
+
+
 # ---------------------------------------------------------------------------
 # API response models
 # ---------------------------------------------------------------------------
@@ -318,6 +326,47 @@ class CleanupResponse(BaseModel):
 
     status: str = "ok"
     retention_days: int
+
+
+class DetectionConfigResponse(BaseModel):
+    """GET /api/detection/config response."""
+
+    enabled: bool
+
+
+class DetectionConfigUpdate(BaseModel):
+    """POST /api/detection/config request body."""
+
+    enabled: bool
+
+
+class DetectionEventSummary(BaseModel):
+    """One row in the month/year history listing (no snapshot blobs)."""
+
+    id: int
+    detected_at: float
+    csi_frames: int
+    smoke_samples: int
+
+
+class DetectionEventsResponse(BaseModel):
+    """GET /api/detection/events response."""
+
+    year: int
+    month: int
+    count: int
+    events: list[DetectionEventSummary]
+
+
+class DetectionEventDetail(BaseModel):
+    """GET /api/detection/events/{id} response — full snapshot payloads."""
+
+    id: int
+    detected_at: float
+    csi_frames: int
+    smoke_samples: int
+    csi: dict
+    smoke: dict
 
 
 class ErrorResponse(BaseModel):

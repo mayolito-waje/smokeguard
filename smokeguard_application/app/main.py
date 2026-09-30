@@ -18,10 +18,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.detection import DetectionManager
+from app.detection_store import DetectionStore
 from app.influxdb_client import InfluxClient
 from app.models import CSIRecord, SmokeRecord, WSCsiData, WSSmokeData, WSStatus
 from app.mqtt_reader import CsiMqttReader
-from app.routes import api, ws
+from app.routes import api, detection, ws
 from app.websocket_manager import ConnectionManager
 
 # ---------------------------------------------------------------------------
@@ -82,6 +84,10 @@ def create_app() -> FastAPI:
         # WebSocket manager
         ws_manager = ConnectionManager(max_queue_size=settings.ws_queue_maxsize)
 
+        # Smoking-activity detection: SQLite store + rolling-buffer manager
+        detection_store = DetectionStore(settings.detection_db_path)
+        detection_manager = DetectionManager(settings, detection_store, ws_manager)
+
         # Shared queue: MQTT network thread → async consumer
         queue: asyncio.Queue[CSIRecord] = asyncio.Queue(maxsize=2000)
 
@@ -126,6 +132,9 @@ def create_app() -> FastAPI:
                     )
                     await ws_manager.broadcast_sync(ws_msg.model_dump(by_alias=False))
 
+                # Feed the detection rolling buffer (last ~7 s of CSI)
+                detection_manager.add_csi(record)
+
         consumer_task = asyncio.create_task(consume_queue())
 
         # Smoke consumer task: fans out from smoke_queue → InfluxDB + WebSocket
@@ -163,7 +172,13 @@ def create_app() -> FastAPI:
                     )
                     await ws_manager.broadcast_sync(ws_msg.model_dump(exclude_none=True))
 
+                # Feed the detection rolling buffer (last ~17 s of smoke)
+                detection_manager.add_smoke(record)
+
         smoke_consumer_task = asyncio.create_task(consume_smoke_queue())
+
+        # Dummy detector trigger loop (fires only while enabled)
+        detection_task = asyncio.create_task(detection_manager.run_trigger_loop())
 
         # Periodic status broadcast task
         async def broadcast_status() -> None:
@@ -200,9 +215,12 @@ def create_app() -> FastAPI:
         app.state.influx = influx
         app.state.ws_manager = ws_manager
         app.state.mqtt_reader = mqtt_reader
+        app.state.detection = detection_manager
+        app.state.detection_store = detection_store
         app.state.num_subcarriers = settings.num_subcarriers
         app.state._consumer_task = consumer_task
         app.state._smoke_consumer_task = smoke_consumer_task
+        app.state._detection_task = detection_task
         app.state._status_task = status_task
         app.state._cleanup_task = cleanup_task
         app.state._queue = queue
@@ -220,7 +238,7 @@ def create_app() -> FastAPI:
             await smoke_queue.put(None)
 
         # Cancel tasks
-        for attr in ("_consumer_task", "_smoke_consumer_task", "_status_task", "_cleanup_task"):
+        for attr in ("_consumer_task", "_smoke_consumer_task", "_detection_task", "_status_task", "_cleanup_task"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
@@ -232,6 +250,11 @@ def create_app() -> FastAPI:
         # Stop MQTT reader
         if mqtt_reader:
             mqtt_reader.stop()
+
+        # Close the detection SQLite store
+        detection_store = getattr(app.state, "detection_store", None)
+        if detection_store:
+            detection_store.close()
 
         # Flush and close InfluxDB
         if influx:
@@ -245,6 +268,7 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     app.include_router(ws.router)
     app.include_router(api.router)
+    app.include_router(detection.router)
 
     return app
 

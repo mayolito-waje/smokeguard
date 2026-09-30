@@ -12,6 +12,11 @@ influxdb_bin/
 # Environment secrets
 .env
 
+# SQLite detection store
+*.db
+*.db-wal
+*.db-shm
+
 # CSV data files
 *.csv
 
@@ -22,3 +27,6 @@ influxdb_bin/
 # OS
 .DS_Store
 Thumbs.db
+
+# ignore prompt file
+instructions.MD

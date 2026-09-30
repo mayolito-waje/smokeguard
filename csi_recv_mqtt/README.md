@@ -117,7 +117,7 @@ always compiles against whatever is in the file — just rebuild after editing.
 | `NTP_SERVER` | `pool.ntp.org` | Server used to set the wall clock behind `timestamp_real` |
 | `MDNS_TIMEOUT_MS` | `3000` | Timeout for `.local` lookups |
 | `MDNS_HOSTNAME` | `csi-recv` | Name this ESP32 answers to over mDNS |
-| `CSI_SENDER_MAC` | `14:C1:9F:28:XX:XX` | Sender MAC; frames from others are ignored |
+| `CSI_SENDER_MAC` | (required — set in `.env`) | Sender MAC; frames from others are ignored |
 | `CSI_CHANNEL` | `0` | Expected channel of a **fixed-channel** sender. `0` disables the check, which is correct for `csi_send_mqtt` |
 | `CSI_QUEUE_DEPTH` | `32` | Packets buffered while the broker is slow |
 | `STATUS_INTERVAL_S` | `30` | Heartbeat period; `0` disables |

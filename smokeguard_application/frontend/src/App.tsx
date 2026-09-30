@@ -7,7 +7,17 @@ import type { Theme } from './renderers/drawStripChart';
 import StripChart from './components/WaterfallChart';
 import VocPanel from './components/VocPanel';
 import AirQualityPanel from './components/AirQualityPanel';
+import DetectionToggle from './components/DetectionToggle';
+import HistoryView from './components/HistoryView';
+import DetectionDetailView from './components/DetectionDetailView';
+import ToastStack from './components/ToastStack';
 import './App.css';
+
+// ---------------------------------------------------------------------------
+// View switching (no router — the project has zero runtime deps beyond React)
+// ---------------------------------------------------------------------------
+
+type View = 'live' | 'history' | 'detail';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -36,6 +46,8 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricsSnapshot>(getMetrics());
   const [theme, setTheme] = useState<Theme>(resolveTheme);
   const [factIdx, setFactIdx] = useState(0);
+  const [view, setView] = useState<View>('live');
+  const [detailId, setDetailId] = useState<number | null>(null);
 
   const facts = useSmokingFacts();
 
@@ -72,6 +84,12 @@ export default function App() {
 
   const currentFact = facts.length > 0 ? facts[factIdx] : '';
 
+  // ---- View navigation ----
+  const openEvent = useCallback((eventId: number) => {
+    setDetailId(eventId);
+    setView('detail');
+  }, []);
+
   return (
     <div className="app">
       {/* ================================================================ */}
@@ -82,6 +100,21 @@ export default function App() {
           <img className="brand-logo" src="/smokeguard_logo.png" alt="SmokeGuard" />
           <span className="brand-sub">CSI Monitor</span>
         </div>
+
+        <nav className="tabs" aria-label="Views">
+          <button
+            className={`tab ${view === 'live' ? 'active' : ''}`}
+            onClick={() => setView('live')}
+          >
+            Live
+          </button>
+          <button
+            className={`tab ${view === 'history' || view === 'detail' ? 'active' : ''}`}
+            onClick={() => setView('history')}
+          >
+            History
+          </button>
+        </nav>
 
         <div className="header-right">
           <span className={`badge ${wsStatusClass(state)}`}>
@@ -104,6 +137,7 @@ export default function App() {
       {/* ================================================================ */}
       {/* Body (sidebar + main chart)                                     */}
       {/* ================================================================ */}
+      {view === 'live' && (
       <div className="body">
         {/* ---- Sidebar ---- */}
         <aside className="sidebar">
@@ -140,6 +174,9 @@ export default function App() {
             </div>
             <p className="trivia-text" key={factIdx}>{currentFact}</p>
           </div>
+
+          {/* Smoking detection toggle */}
+          <DetectionToggle />
         </aside>
 
         {/* ---- Main chart + bottom sensor panels ---- */}
@@ -151,6 +188,25 @@ export default function App() {
           </div>
         </main>
       </div>
+      )}
+
+      {/* ================================================================ */}
+      {/* History / Detail views                                           */}
+      {/* ================================================================ */}
+      {view === 'history' && (
+        <HistoryView onOpen={openEvent} />
+      )}
+      {view === 'detail' && detailId !== null && (
+        <DetectionDetailView
+          key={detailId}
+          id={detailId}
+          theme={theme}
+          onBack={() => setView('history')}
+        />
+      )}
+
+      {/* Stacking alert toasts (all views) */}
+      <ToastStack />
 
       {/* ================================================================ */}
       {/* Footer                                                          */}

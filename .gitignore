@@ -39,6 +39,9 @@ influxdb_bin/
 # Environment secrets
 .env
 
+# Device MAC dumps (serial log capture)
+esp_mac_identifier/mac_addresses.txt
+
 # OS
 .DS_Store
 Thumbs.db

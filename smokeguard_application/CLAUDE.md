@@ -27,7 +27,7 @@ bash scripts/setup_influxdb.sh   # first time only — creates org, bucket, toke
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run in replay mode (no hardware — replays sample CSV)
-REPLAY_CSV=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+REPLAY_CSV=./sample_csv_output/csi_data.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 InfluxDB v2.7.10 binary is at `influxdb_bin/influxd`. Data is stored in `./influxdb_data/` (gitignored). The bucket is `csi_data` in org `smokeguard` with 30-day retention.
@@ -126,14 +126,25 @@ Server → client at `GET /ws`:
  "gas_kohm": 120.4, "altitude_m": 45.2, "rssi": -52}
 {"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
  "receiver_online": true, "ntp_synced": true, ...}
+{"type": "alert", "id": 42, "detected_at": 1790756577.8}
 {"type": "pong"}
 ```
 
 The `metadata` field is always present (including `subcarrier_index_offset` for signed-subcarrier axis mapping). For LLTF / unknown subcarrier counts, metadata is computed dynamically — it is never `null` for valid data.
 
-Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`.
+Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`. The `alert` message fires when a smoking activity is detected (toast trigger).
 
-### REST API (`app/routes/api.py`)
+### Smoking-activity detection (`app/detection.py`, `app/detection_store.py`, `app/routes/detection.py`)
+
+The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets → ResNet-LSTM, weighted box fusion) does not exist yet — everything around it does:
+
+- **`DetectionManager`** keeps rolling in-memory buffers of recent `CSIRecord`s (~7 s) and `SmokeRecord`s (~17 s), fed from the two consumer tasks in `main.py`. Pruning is relative to the **latest record's timestamp** (not `time.time()`) so CSV replay works — replayed rows carry original capture timestamps.
+- **Dummy trigger**: `run_trigger_loop()` fires at random intervals (`dummy_trigger_min_s`/`dummy_trigger_max_s`, default 30–120 s) **only when enabled** (SQLite-persisted flag, default off). At most one trigger can be in flight when the toggle flips off. `POST /api/detection/simulate` fires one manually and bypasses the toggle.
+- **The seam**: `DetectionManager.detect(csi, smoke) -> bool` currently returns `bool(csi)` — this is the ONLY method the real models will replace. It receives exactly the 7 s/17 s windows the SVM + ResNet-LSTM will consume.
+- **Snapshot on trigger**: CSI is stored as per-frame `{t, amp}` for the **active subcarriers only** (amplitude = `sqrt(i²+q²)`, rounded to 2 dp; the viz pipeline consumes amplitude only), smoke as full sample dicts. Both windows are persisted as JSON in SQLite (`detection.db`, table `detection_events`) alongside the detection timestamp — deliberately independent of InfluxDB, whose 7-day CSI cleanup would erase old events.
+- **Frontend**: `alert` WS messages → `alertStore` → `ToastStack` (top-right, newest stacks below, × close + 8 s auto-dismiss). The Live sidebar has a `DetectionToggle` card (enable/disable + simulate). Header tabs switch to the History view (month/year picker → event list) and the Detail view, which preprocesses the CSI window with the notebook pipeline ported to TypeScript (`frontend/src/dsp/preprocess.ts` — Hampel row-wise → Butterworth 20 Hz filtfilt → Gaussian σ=2, verified against scipy ≤ 1e-5 via `scripts/gen_dsp_fixture.py`) and renders 3 random subcarriers (original dotted vs preprocessed solid, normalized time) plus the gas-resistance chart (reuses `drawVocChart`) and average tiles for the other smoke metrics.
+
+### REST API (`app/routes/api.py`, `app/routes/detection.py`)
 
 | Endpoint | Description |
 |----------|-------------|
@@ -142,6 +153,11 @@ Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "
 | `GET /api/readings/latest?limit=N` | N most recent readings (default 10, max 500) |
 | `GET /api/readings?start=<ISO>&stop=<ISO>&limit=N` | Time-range query (start required, max 10000) |
 | `GET /api/cleanup` | Manually trigger retention cleanup (deletes readings older than `csi_retention_days`, default 7) |
+| `GET /api/detection/config` | `{enabled}` — current detection toggle state |
+| `POST /api/detection/config` | Body `{enabled}` — persist the toggle (survives restarts) |
+| `POST /api/detection/simulate` | Fire the detector once manually (bypasses the toggle; 409 if no CSI buffered) |
+| `GET /api/detection/events?year=&month=` | Detection events for a month, newest first (summaries, no JSON blobs) |
+| `GET /api/detection/events/{id}` | Full event incl. CSI/smoke snapshots (404 if missing) |
 
 ## ESP-IDF Build System (sibling components)
 
@@ -157,7 +173,6 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ```
 [ESP32-S3 "Tx"] --ESP-NOW (ch 11, HT40, MCS0, 100 Hz)--> [ESP32-S3 "Rx"]
-  14:C1:9F:28:XX:XX                                        14:C1:9F:28:XX:XX
                                                                   |
                                                    Wi-Fi (hotspot) → Mosquitto
                                                        home/csi/data|status
@@ -166,7 +181,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
                                                          This application
 ```
 
-Bridge MAC: `14:C1:9F:28:XX:XX`. The receiver filters CSI packets by sender MAC (`CFG_CSI_SENDER_MAC` in `csi_recv_mqtt/main/.env`).
+The receiver filters CSI packets by sender MAC (`CFG_CSI_SENDER_MAC` in `csi_recv_mqtt/main/.env`).
 
 ## CSI Data Format
 
@@ -209,7 +224,7 @@ The frontend lives in `frontend/` — a Vite + React 18 + TypeScript SPA that vi
 
 ```bash
 # Terminal 1: Backend (replay mode — no hardware needed)
-REPLAY_CSV=./sample_csv_output/sample.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+REPLAY_CSV=./sample_csv_output/csi_data.csv uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Terminal 2: Frontend dev server
 cd frontend && npm run dev

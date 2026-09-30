@@ -28,7 +28,7 @@ const MIN_SPAN_S = 1.0;
 // Theme-aware palette
 // ---------------------------------------------------------------------------
 
-interface ChartColors {
+export interface ChartColors {
   bg: string;
   grid: string;
   zeroLine: string;
@@ -36,7 +36,7 @@ interface ChartColors {
   nowLine: string;
 }
 
-const PALETTE: Record<Theme, ChartColors> = {
+export const PALETTE: Record<Theme, ChartColors> = {
   dark: {
     bg:        '#0d0d0d',
     grid:      'rgba(255,255,255,0.045)',
@@ -107,7 +107,7 @@ function buildDataMask(
 // ---------------------------------------------------------------------------
 
 /** Spectral colour, mapped across the data subcarriers only. */
-function lineColor(j: number, dataStart: number, dataEnd: number): string {
+export function lineColor(j: number, dataStart: number, dataEnd: number): string {
   const t = (j - dataStart) / Math.max(1, dataEnd - dataStart); // 0 … 1
   const hue = 225 - t * 218;                    // 225° (blue) → 7° (red)
   return `hsla(${hue.toFixed(0)}, 68%, 56%, 0.80)`;

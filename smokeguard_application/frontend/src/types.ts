@@ -70,7 +70,74 @@ export interface SmokeSample {
   rssi: number;
 }
 
-export type WsMessage = WsWelcome | CsiFrame | SmokeSample | WsStatus | { type: 'pong' };
+export interface WsAlert {
+  type: 'alert';
+  id: number;
+  detected_at: number;
+}
+
+export type WsMessage = WsWelcome | CsiFrame | SmokeSample | WsStatus | WsAlert | { type: 'pong' };
+
+// ---------------------------------------------------------------------------
+// Detection API types (REST /api/detection/*)
+// ---------------------------------------------------------------------------
+
+export interface DetectionConfig {
+  enabled: boolean;
+}
+
+export interface DetectionEventSummary {
+  id: number;
+  detected_at: number;
+  csi_frames: number;
+  smoke_samples: number;
+}
+
+export interface DetectionEventsResponse {
+  year: number;
+  month: number;
+  count: number;
+  events: DetectionEventSummary[];
+}
+
+export interface DetectionCsiFrame {
+  t: number;
+  amp: number[];
+}
+
+export interface DetectionCsiData {
+  subcarrier_count: number;
+  active_indices: number[];
+  frames: DetectionCsiFrame[];
+}
+
+export interface DetectionSmokeSample {
+  timestamp_real: number;
+  pm1_0: number;
+  pm2_5: number;
+  pm10: number;
+  cnt0_3: number;
+  cnt0_5: number;
+  cnt1_0: number;
+  cnt2_5: number;
+  cnt5_0: number;
+  cnt10: number;
+  temp_c: number | null;
+  pressure_hpa: number | null;
+  humidity_pct: number | null;
+  gas_kohm: number | null;
+  altitude_m: number | null;
+  rssi: number;
+}
+
+export interface DetectionEventDetail {
+  id: number;
+  detected_at: number;
+  csi_frames: number;
+  smoke_samples: number;
+  csi: DetectionCsiData;
+  smoke: { samples: DetectionSmokeSample[] };
+}
 
 // ---------------------------------------------------------------------------
 // Application state
