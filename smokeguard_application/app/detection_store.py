@@ -151,3 +151,12 @@ class DetectionStore:
             "csi": json.loads(row[4]),
             "smoke": json.loads(row[5]),
         }
+
+    def delete_event(self, event_id: int) -> bool:
+        """Delete one event; returns True when a row was removed."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM detection_events WHERE id = ?", (event_id,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0

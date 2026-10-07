@@ -12,6 +12,9 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "numpy>=2.4.0",
+    "pyjwt>=2.15.1",
+    "bcrypt>=5.0.0",
+    "pyarrow>=25.0.1",
 ]
 
 [dependency-groups]

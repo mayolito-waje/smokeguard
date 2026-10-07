@@ -4,11 +4,14 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+from app.auth import get_current_user
 
 from app.models import (
     DetectionConfigResponse,
     DetectionConfigUpdate,
+    DetectionEventDeleteResponse,
     DetectionEventDetail,
     DetectionEventSummary,
     DetectionEventsResponse,
@@ -49,14 +52,20 @@ async def get_detection_config(request: Request) -> DetectionConfigResponse:
 @router.post(
     "/config",
     response_model=DetectionConfigResponse,
-    responses={400: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
 )
 async def set_detection_config(
-    request: Request, body: DetectionConfigUpdate
+    request: Request,
+    body: DetectionConfigUpdate,
+    _user: str = Depends(get_current_user),
 ) -> DetectionConfigResponse:
-    """Enable or disable the automatic detection mechanism."""
+    """Enable or disable the automatic detection mechanism (bearer required)."""
     _get_store(request).set_enabled(body.enabled)
-    logger.info("Smoking detection %s", "enabled" if body.enabled else "disabled")
+    logger.info(
+        "Smoking detection %s (by %s)",
+        "enabled" if body.enabled else "disabled",
+        _user,
+    )
     return DetectionConfigResponse(enabled=body.enabled)
 
 
@@ -67,10 +76,12 @@ async def set_detection_config(
 @router.post(
     "/simulate",
     response_model=DetectionEventSummary,
-    responses={409: {"model": ErrorResponse}},
+    responses={401: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-async def simulate_detection(request: Request) -> DetectionEventSummary:
-    """Manually fire the detector once (test override, bypasses the toggle)."""
+async def simulate_detection(
+    request: Request, _user: str = Depends(get_current_user)
+) -> DetectionEventSummary:
+    """Manually fire the detector once (bearer required; bypasses the toggle)."""
     detection = _get_detection(request)
     if not detection.has_buffered_csi:
         raise HTTPException(
@@ -80,6 +91,7 @@ async def simulate_detection(request: Request) -> DetectionEventSummary:
     result = await detection.trigger()
     if result is None:
         raise HTTPException(status_code=409, detail="Detector did not fire")
+    logger.info("Detection simulated by %s (event #%s)", _user, result["id"])
     return DetectionEventSummary(**result)
 
 
@@ -116,3 +128,20 @@ async def get_detection_event(
     if event is None:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
     return DetectionEventDetail(**event)
+
+
+@router.delete(
+    "/events/{event_id}",
+    response_model=DetectionEventDeleteResponse,
+    responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def delete_detection_event(
+    request: Request,
+    event_id: int,
+    _user: str = Depends(get_current_user),
+) -> DetectionEventDeleteResponse:
+    """Delete one event from the SQLite store (bearer required; irreversible)."""
+    if not _get_store(request).delete_event(event_id):
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    logger.info("Detection event #%d deleted (by %s)", event_id, _user)
+    return DetectionEventDeleteResponse()

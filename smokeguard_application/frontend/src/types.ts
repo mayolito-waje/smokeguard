@@ -28,13 +28,16 @@ export interface CsiFrame {
 }
 
 export interface SubcarrierMetadata {
+  // Data runs in array order (ESP-IDF FFT-bin order: index 0 is the DC null,
+  // then the subcarrier numbers wrap to negatives) — not by sign.
   data_start_idx: number;
   data_end_idx: number;
   dc_null_idx: number;
   data_upper_start: number;
   data_upper_end: number;
   total_pairs: number;
-  subcarrier_index_offset: number;
+  /** First negative subcarrier: sc = idx < wrap ? idx : idx - total_pairs */
+  subcarrier_wrap_idx: number;
 }
 
 export interface WsStatus {

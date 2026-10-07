@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { authFetch } from '../session';
 import type { DetectionConfig } from '../types';
 
 export default function DetectionToggle() {
@@ -29,7 +30,7 @@ export default function DetectionToggle() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch('/api/detection/config', {
+      const res = await authFetch('/api/detection/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !enabled }),
@@ -52,7 +53,7 @@ export default function DetectionToggle() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch('/api/detection/simulate', { method: 'POST' });
+      const res = await authFetch('/api/detection/simulate', { method: 'POST' });
       if (res.status === 409) {
         setError('No CSI data buffered yet');
       } else if (!res.ok) {

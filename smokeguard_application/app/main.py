@@ -17,13 +17,15 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import hash_password
+from app.auth_store import AuthStore
 from app.config import get_settings
 from app.detection import DetectionManager
 from app.detection_store import DetectionStore
 from app.influxdb_client import InfluxClient
 from app.models import CSIRecord, SmokeRecord, WSCsiData, WSSmokeData, WSStatus
 from app.mqtt_reader import CsiMqttReader
-from app.routes import api, detection, ws
+from app.routes import api, auth, detection, ws
 from app.websocket_manager import ConnectionManager
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,13 @@ def create_app() -> FastAPI:
         # Smoking-activity detection: SQLite store + rolling-buffer manager
         detection_store = DetectionStore(settings.detection_db_path)
         detection_manager = DetectionManager(settings, detection_store, ws_manager)
+
+        # Admin auth store: bootstrap admin/admin on first run only (a
+        # password changed via the reset API is never clobbered on restart)
+        auth_store = AuthStore(settings.auth_db_path)
+        if auth_store.get_password_hash("admin") is None:
+            auth_store.upsert_user("admin", hash_password("admin"))
+            logger.info("Bootstrapped initial admin user 'admin'")
 
         # Shared queue: MQTT network thread → async consumer
         queue: asyncio.Queue[CSIRecord] = asyncio.Queue(maxsize=2000)
@@ -217,6 +226,7 @@ def create_app() -> FastAPI:
         app.state.mqtt_reader = mqtt_reader
         app.state.detection = detection_manager
         app.state.detection_store = detection_store
+        app.state.auth_store = auth_store
         app.state.num_subcarriers = settings.num_subcarriers
         app.state._consumer_task = consumer_task
         app.state._smoke_consumer_task = smoke_consumer_task
@@ -256,6 +266,11 @@ def create_app() -> FastAPI:
         if detection_store:
             detection_store.close()
 
+        # Close the auth SQLite store
+        auth_store = getattr(app.state, "auth_store", None)
+        if auth_store:
+            auth_store.close()
+
         # Flush and close InfluxDB
         if influx:
             influx.flush()
@@ -269,6 +284,7 @@ def create_app() -> FastAPI:
     app.include_router(ws.router)
     app.include_router(api.router)
     app.include_router(detection.router)
+    app.include_router(auth.router)
 
     return app
 

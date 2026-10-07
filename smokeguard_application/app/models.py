@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -30,32 +30,42 @@ DATA_COLUMNS_C5C6 = [
 # Subcarrier layout metadata
 # ---------------------------------------------------------------------------
 #
-# Array indices are 0-based positions in the I/Q samples list.
-# Signed subcarrier numbers: sc_num = array_idx - subcarrier_index_offset
-# (e.g. array[32] - 32 = sc 0 = DC null for 64-subcarrier HT40).
+# Array indices are 0-based positions in the (de-interleaved) subcarrier-pair
+# list.  ESP-IDF reports CSI in FFT-bin order: index 0 is the DC null,
+# subcarrier numbers ascend to the Nyquist bin, then the sequence wraps to
+# negatives — [0 … 31, -32 … -1] for 64 pairs.  (Verified on a 5924-row
+# capture: pair indices [0, 27..37] are always exactly zero.)
+#
+# Signed subcarrier numbers: sc = idx if idx < subcarrier_wrap_idx
+#                                else idx - total_pairs
+# (e.g. array[38] - 64 = sc -26 for 64 subcarriers; DC is always index 0).
+#
+# The two data-run key pairs (data_start_* / data_upper_*) denote array order,
+# not sign — the first run is the positive-sc half.
 #
 # For LLTF mode the ESP32 reports fewer subcarriers (~50-57), so we compute
 # metadata dynamically when the exact len is not in the known-sizes table.
 #
 # Known layouts (indexed by len = number of I/Q integers):
 SUBCARRIER_METADATA: dict[int, dict[str, int]] = {
-    128: {  # len = 128 → 64 subcarriers (HT40, HTLTF)
-        "data_start_idx": 6,
-        "data_end_idx": 31,
-        "dc_null_idx": 32,
-        "data_upper_start": 33,
-        "data_upper_end": 58,
+    128: {  # len = 128 → 64 subcarriers (HT40)
+        "data_start_idx": 1,             # sc +1 … +26
+        "data_end_idx": 26,
+        "dc_null_idx": 0,                # sc 0
+        "data_upper_start": 38,          # sc -26 … -1
+        "data_upper_end": 63,
         "total_pairs": 64,
-        "subcarrier_index_offset": 32,   # sc = array_idx - 32  →  [-32 … +31]
+        "subcarrier_wrap_idx": 32,       # sc = idx < 32 ? idx : idx - 64
     },
     256: {  # len = 256 → 128 subcarriers (HT40 on newer chips)
-        "data_start_idx": 6,
-        "data_end_idx": 63,
-        "dc_null_idx": 64,
-        "data_upper_start": 65,
-        "data_upper_end": 122,
+        # Assumed to follow the same FFT-bin order; no len=256 sample to verify.
+        "data_start_idx": 1,             # sc +1 … +58
+        "data_end_idx": 58,
+        "dc_null_idx": 0,                # sc 0
+        "data_upper_start": 70,          # sc -58 … -1
+        "data_upper_end": 127,
         "total_pairs": 128,
-        "subcarrier_index_offset": 64,   # sc = array_idx - 64  →  [-64 … +63]
+        "subcarrier_wrap_idx": 64,       # sc = idx < 64 ? idx : idx - 128
     },
 }
 
@@ -66,23 +76,32 @@ SUBCARRIER_METADATA: dict[int, dict[str, int]] = {
 def _build_lltf_metadata(subcarrier_count: int) -> dict[str, int]:
     """Build subcarrier layout metadata for an arbitrary subcarrier count.
 
-    The ESP32 CSI data array is ordered from lowest to highest subcarrier
-    index.  The DC null subcarrier (index 0) sits at the centre of the array.
-    Without per-mode guard-band knowledge we conservatively treat the outer
-    ~8 % on each side as guard / null tones and the rest as data subcarriers.
+    ESP-IDF stores CSI in FFT-bin order: index 0 is the DC null, positive
+    subcarrier numbers ascend to the Nyquist bin, then the sequence wraps to
+    negatives (indices >= wrap map to idx - count).  Without per-mode
+    guard-band knowledge we conservatively treat the outer ~5 % (min 2 tones)
+    of each band edge as guard tones.  Very small counts can yield empty or
+    inverted runs — consumers clamp.
     """
-    dc_center = subcarrier_count // 2
-    # Reasonable guard estimate for LLTF: ~2-3 tones per edge
+    wrap_idx = (subcarrier_count + 1) // 2   # first negative subcarrier
+    # Reasonable guard estimate for LLTF: ~2-3 tones per band edge
     guard_width = max(2, subcarrier_count // 20)
 
+    sc_max = wrap_idx - 1                        # e.g. +31 for 64 pairs
+    sc_min = -(subcarrier_count - wrap_idx)      # e.g. -32 for 64 pairs
+
+    def to_index(sc: int) -> int:
+        """Map a signed subcarrier number to its array index."""
+        return sc if sc >= 0 else sc + subcarrier_count
+
     return {
-        "data_start_idx": guard_width,
-        "data_end_idx": dc_center - 1,
-        "dc_null_idx": dc_center,
-        "data_upper_start": dc_center + 1,
-        "data_upper_end": subcarrier_count - 1 - guard_width,
+        "data_start_idx": 1,
+        "data_end_idx": sc_max - guard_width,
+        "dc_null_idx": 0,
+        "data_upper_start": to_index(sc_min + guard_width),
+        "data_upper_end": subcarrier_count - 1,
         "total_pairs": subcarrier_count,
-        "subcarrier_index_offset": dc_center,
+        "subcarrier_wrap_idx": wrap_idx,
     }
 
 
@@ -367,6 +386,53 @@ class DetectionEventDetail(BaseModel):
     smoke_samples: int
     csi: dict
     smoke: dict
+
+
+class DetectionEventDeleteResponse(BaseModel):
+    """DELETE /api/detection/events/{id} response."""
+
+    status: str = "deleted"
+
+
+# ---------------------------------------------------------------------------
+# Auth request/response schemas
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    """POST /api/auth/login request body."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class LoginResponse(BaseModel):
+    """POST /api/auth/login response — JWT plus its expiry for the client."""
+
+    token: str
+    expires_at: float = Field(description="JWT expiry, UNIX epoch seconds")
+
+
+class PasswordResetRequest(BaseModel):
+    """POST /api/auth/reset-password request body (also needs a bearer token)."""
+
+    username: str = Field(min_length=1, max_length=64)
+    new_password: str = Field(min_length=1)
+    secret: str = Field(min_length=1)
+
+    @field_validator("new_password")
+    @classmethod
+    def _bcrypt_byte_limit(cls, v: str) -> str:
+        # bcrypt hashes at most 72 BYTES and bcrypt 5.x rejects longer input;
+        # a char-based max_length would be wrong for non-ASCII passwords.
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("new_password must be at most 72 bytes")
+        return v
+
+
+class PasswordResetResponse(BaseModel):
+    """POST /api/auth/reset-password response."""
+
+    status: str = "ok"
 
 
 class ErrorResponse(BaseModel):

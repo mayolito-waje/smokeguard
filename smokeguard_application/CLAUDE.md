@@ -22,6 +22,7 @@ uv sync
 # Start InfluxDB (run in a separate terminal)
 bash scripts/start_influxdb.sh
 bash scripts/setup_influxdb.sh   # first time only — creates org, bucket, token → .env
+bash scripts/setup_auth_secrets.sh  # first time only — generates admin-auth secrets → .env
 
 # Run with real hardware (Mosquitto broker + csi_recv_mqtt publishing)
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -31,6 +32,8 @@ REPLAY_CSV=./sample_csv_output/csi_data.csv uv run uvicorn app.main:app --host 0
 ```
 
 InfluxDB v2.7.10 binary is at `influxdb_bin/influxd`. Data is stored in `./influxdb_data/` (gitignored). The bucket is `csi_data` in org `smokeguard` with 30-day retention.
+
+The dashboard requires an admin login — initial credentials `admin` / `admin` (see Admin auth below).
 
 ## Backend Architecture
 
@@ -70,7 +73,7 @@ Key design decisions:
 - WebSocket broadcast uses pre-serialized JSON (one `json.dumps` per message, not per client).
 - Per-client bounded queues drop oldest messages when full — slow clients never stall the 100 Hz pipeline.
 - InfluxDB writes use the official client's background batching thread (`batch_size=500`, `flush_interval=1000ms`).
-- A periodic cleanup task (`cleanup_old_readings` in `main.py`) deletes readings older than `csi_retention_days` (default 7 days) via InfluxDB's delete API — first run 60 s after startup, then every `cleanup_interval_hours` (default 0.5 h = 30 min). Export CSVs (`scripts/export_csi_data_to_csv.py` for CSI, `scripts/export_smoke_sensor_data_to_csv.py` for smoke — same `--out/--limit/--start/--stop` CLI) before the window expires; deleted points are unrecoverable.
+- A periodic cleanup task (`cleanup_old_readings` in `main.py`) deletes readings older than `csi_retention_days` (default 7 days) via InfluxDB's delete API — first run 60 s after startup, then every `cleanup_interval_hours` (default 0.5 h = 30 min). Export Parquet first (`scripts/export_csi_data_to_parquet.py` for CSI, `scripts/export_smoke_sensor_data_to_parquet.py` for smoke — same `--out/--limit/--start/--stop` CLI; zstd-compressed, streamed row groups so memory stays bounded, CSI `i`/`q` as `list<int32>` columns) before the window expires; deleted points are unrecoverable.
 
 ### CSI parsing (`app/mqtt_reader.py`)
 
@@ -90,9 +93,9 @@ Two format variants detected by field count:
 
 Timestamp handling: the firmware NTP-stamps the trailing `timestamp_real` column (UNIX epoch seconds with microseconds). Until its first NTP sync it sends `0.000000`, so the backend falls back to `UNIX_START_TIME + (local_timestamp - OFFSET_TIME) / 1_000_000.0`, where the baseline is captured on the first valid row of each connection. The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes — `_compute_timestamp` detects wraparound and accumulates overflow.
 
-Subcarrier layout for 128 I/Q values (64 subcarriers): guard band (pairs 0–5), lower data (6–31), DC null (32), upper data (33–58), guard band (59–63).
+Subcarrier layout for 128 I/Q values (64 subcarriers, ESP-IDF FFT-bin order): DC null (pair 0), data (1–26 → sc +1…+26), upper guard (27–31 → sc +27…+31), lower guard (32–37 → sc −32…−27), data (38–63 → sc −26…−1). Signed subcarrier number: `sc = idx < 32 ? idx : idx − 64`.
 
-For unknown lengths (LLTF mode with ~50–57 subcarriers, or other custom modes), metadata is computed dynamically via `_build_lltf_metadata()` in `app/models.py`. This estimates guard bands (~5% each edge) and provides the `subcarrier_index_offset` so the frontend can map raw array indices to **signed subcarrier numbers** (e.g. array[28] − 28 = sc 0 = DC null for 57-subcarrier LLTF). The `CSIRecord.subcarrier_metadata` property always returns a valid metadata dict (never `None` for valid data).
+For unknown lengths (LLTF mode with ~50–57 subcarriers, or other custom modes), metadata is computed dynamically via `_build_lltf_metadata()` in `app/models.py`. This estimates guard bands (~5% each edge) and provides `subcarrier_wrap_idx` so the frontend can map raw array indices to **signed subcarrier numbers** via `sc = idx < wrap ? idx : idx − total_pairs` (e.g. 57-subcarrier LLTF, wrap = 29: array[29] − 57 = sc −28; the DC null is always index 0). The `CSIRecord.subcarrier_metadata` property always returns a valid metadata dict (never `None` for valid data).
 
 ### InfluxDB schema (`app/influxdb_client.py`)
 
@@ -118,8 +121,9 @@ Server → client at `GET /ws`:
  "channel": 11, "bandwidth": 1, "mcs": 0, "noise_floor": -98, "ant": 0,
  "length": 128, "subcarrier_count": 64,
  "i": [0,0,10,9,...], "q": [0,0,3,3,...],
- "metadata": {"data_start_idx": 6, "data_end_idx": 31, "dc_null_idx": 32, ...,
-              "subcarrier_index_offset": 32}}
+ "metadata": {"data_start_idx": 1, "data_end_idx": 26, "dc_null_idx": 0,
+              "data_upper_start": 38, "data_upper_end": 63, "total_pairs": 64,
+              "subcarrier_wrap_idx": 32}}
 {"type": "smoke", "t": 1727090000.0, "pm1_0": 7, "pm2_5": 15, "pm10": 22,
  "cnt0_3": 1800, "cnt0_5": 600, "cnt1_0": 200, "cnt2_5": 90, "cnt5_0": 30,
  "cnt10": 4, "temp_c": 27.34, "pressure_hpa": 998.2, "humidity_pct": 48.5,
@@ -130,7 +134,7 @@ Server → client at `GET /ws`:
 {"type": "pong"}
 ```
 
-The `metadata` field is always present (including `subcarrier_index_offset` for signed-subcarrier axis mapping). For LLTF / unknown subcarrier counts, metadata is computed dynamically — it is never `null` for valid data.
+The `metadata` field is always present (including `subcarrier_wrap_idx` for signed-subcarrier mapping). For LLTF / unknown subcarrier counts, metadata is computed dynamically — it is never `null` for valid data.
 
 Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`. The `alert` message fires when a smoking activity is detected (toast trigger).
 
@@ -141,8 +145,23 @@ The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets �
 - **`DetectionManager`** keeps rolling in-memory buffers of recent `CSIRecord`s (~7 s) and `SmokeRecord`s (~17 s), fed from the two consumer tasks in `main.py`. Pruning is relative to the **latest record's timestamp** (not `time.time()`) so CSV replay works — replayed rows carry original capture timestamps.
 - **Dummy trigger**: `run_trigger_loop()` fires at random intervals (`dummy_trigger_min_s`/`dummy_trigger_max_s`, default 30–120 s) **only when enabled** (SQLite-persisted flag, default off). At most one trigger can be in flight when the toggle flips off. `POST /api/detection/simulate` fires one manually and bypasses the toggle.
 - **The seam**: `DetectionManager.detect(csi, smoke) -> bool` currently returns `bool(csi)` — this is the ONLY method the real models will replace. It receives exactly the 7 s/17 s windows the SVM + ResNet-LSTM will consume.
-- **Snapshot on trigger**: CSI is stored as per-frame `{t, amp}` for the **active subcarriers only** (amplitude = `sqrt(i²+q²)`, rounded to 2 dp; the viz pipeline consumes amplitude only), smoke as full sample dicts. Both windows are persisted as JSON in SQLite (`detection.db`, table `detection_events`) alongside the detection timestamp — deliberately independent of InfluxDB, whose 7-day CSI cleanup would erase old events.
-- **Frontend**: `alert` WS messages → `alertStore` → `ToastStack` (top-right, newest stacks below, × close + 8 s auto-dismiss). The Live sidebar has a `DetectionToggle` card (enable/disable + simulate). Header tabs switch to the History view (month/year picker → event list) and the Detail view, which preprocesses the CSI window with the notebook pipeline ported to TypeScript (`frontend/src/dsp/preprocess.ts` — Hampel row-wise → Butterworth 20 Hz filtfilt → Gaussian σ=2, verified against scipy ≤ 1e-5 via `scripts/gen_dsp_fixture.py`) and renders 3 random subcarriers (original dotted vs preprocessed solid, normalized time) plus the gas-resistance chart (reuses `drawVocChart`) and average tiles for the other smoke metrics.
+- **Snapshot on trigger**: CSI is stored as per-frame `{t, amp}` for the **active subcarriers only** (amplitude = `sqrt(i²+q²)`, rounded to 2 dp; the viz pipeline consumes amplitude only), smoke as full sample dicts. Both windows are persisted as JSON in SQLite (`detection.db`, table `detection_events`) alongside the detection timestamp — deliberately independent of InfluxDB, whose 7-day CSI cleanup would erase old events. The active set follows the ESP-IDF FFT-bin mapping (for 64 subcarriers: indices 1–26 → sc +1…+26, 38–63 → sc −26…−1); pre-fix events (no `snapshot_version`) carry the old index set and are not migrated.
+- **Frontend**: `alert` WS messages → `alertStore` → `ToastStack` (top-right, newest stacks below, × close + 8 s auto-dismiss). The Live sidebar has a `DetectionToggle` card (enable/disable + simulate). Header tabs switch to the History view (month/year picker → event list) and the Detail view, which preprocesses the CSI window with the notebook pipeline ported to TypeScript (`frontend/src/dsp/preprocess.ts` — Hampel row-wise → Butterworth 20 Hz filtfilt → Gaussian σ=2, verified against scipy ≤ 1e-5 via `scripts/gen_dsp_fixture.py`) and renders 3 random subcarriers (original dotted vs preprocessed solid, normalized time) plus the gas-resistance chart (reuses `drawVocChart`) and average tiles for the other smoke metrics. Reshuffling (and the initial pick) only considers subcarriers whose traces carry signal, so the DC null / guard bands — which pre-fix events stored in `active_indices` — are never picked. A bin button in the detail toolbar deletes the event (`DELETE /api/detection/events/{id}`, confirm first) and returns to History.
+
+### Admin auth (PoC) (`app/auth.py`, `app/auth_store.py`, `app/routes/auth.py`)
+
+- The admin user lives in `auth.db` (SQLite table `users`; `AuthStore` mirrors the detection store's single-connection + lock pattern). Passwords are **bcrypt**-hashed with a per-hash salt. `admin`/`admin` is bootstrapped on first startup only — a password changed via the reset API is never clobbered on restart (deleting `auth.db` re-bootstraps it).
+- Sessions are **JWTs** (HS256, `sub`/`iat`/`exp`), signed with `JWT_SECRET` from the gitignored `.env`; lifetime `JWT_EXPIRE_DAYS` (default 7 days). `get_current_user` in `app/auth.py` is the reusable `Depends(...)` for future protected routes.
+- Password reset is **API-only** and requires BOTH a valid non-expired bearer token AND the separate `PASSWORD_RESET_SECRET` (both `.env`, generated by `scripts/setup_auth_secrets.sh`). There is deliberately no reset UI — example:
+
+  ```bash
+  curl -X POST localhost:8000/api/auth/reset-password \
+    -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+    -d '{"username":"admin","new_password":"password123","secret":"<PASSWORD_RESET_SECRET>"}'
+  ```
+
+- Scope: the UI is gated (frontend `AuthGate` hides the dashboard) and every mutating/destructive route requires a valid bearer token (`Depends(get_current_user)`) — `POST /api/detection/config`, `POST /api/detection/simulate`, `DELETE /api/detection/events/{id}`, `GET /api/cleanup`. Read-only routes and `/ws` stay open. JWTs are stateless: logout and password resets do not revoke issued tokens; they expire on their own.
+- Config gotcha: `Settings` (pydantic-settings) uses `extra='forbid'` — **any new `.env` key must be declared as a field in `app/config.py`** or the backend fails to import (`ValidationError: Extra inputs are not permitted`).
 
 ### REST API (`app/routes/api.py`, `app/routes/detection.py`)
 
@@ -158,6 +177,11 @@ The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets �
 | `POST /api/detection/simulate` | Fire the detector once manually (bypasses the toggle; 409 if no CSI buffered) |
 | `GET /api/detection/events?year=&month=` | Detection events for a month, newest first (summaries, no JSON blobs) |
 | `GET /api/detection/events/{id}` | Full event incl. CSI/smoke snapshots (404 if missing) |
+| `DELETE /api/detection/events/{id}` | Delete one event from SQLite (404 if missing; irreversible) |
+| `POST /api/auth/login` | Body `{username, password}` → `{token, expires_at}`; 401 on bad credentials |
+| `POST /api/auth/reset-password` | Body `{username, new_password, secret}`; requires a valid bearer token (401), 403 on bad secret, 404 unknown user |
+
+**Bearer-token required** (`Authorization: Bearer <JWT>`): `GET /api/cleanup`, `POST /api/detection/config`, `POST /api/detection/simulate`, `DELETE /api/detection/events/{id}`. All other routes are open.
 
 ## ESP-IDF Build System (sibling components)
 
@@ -237,7 +261,7 @@ cd frontend && npm run dev
 cd frontend && npm run build   # → dist/
 ```
 
-### Architecture (15 source files)
+### Architecture (19 source files)
 
 - **100 Hz data path**: CSI frames arrive via WebSocket → parsed → `csiStore.pushFrame()` computes amplitude (`sqrt(I²+Q²)`) and pushes into a module-level ring buffer (max 600 frames, ~6 s at 100 Hz). No React re-renders per frame.
 - **Canvas at 60 fps**: `StripChart` (exported from `WaterfallChart.tsx`) runs its own `requestAnimationFrame` loop, pulling the latest frame from the store, maintaining a 600-frame ring buffer, and calling the pure render function `drawStripChart()`.
@@ -250,6 +274,7 @@ cd frontend && npm run build   # → dist/
 - **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card), main chart area (CSI chart on top, bottom-panels row below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
 - **Trivia** (`src/hooks/useSmokingFacts.ts`): Fetches intro extracts from 15 Wikipedia smoking-related articles on first load, parses into sentences, combines with 30 hand-picked fallback facts, and caches in `localStorage` for 24 hours. Rotates every 8 seconds in the sidebar.
 - **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore` and `smoke` messages to `smokeStore`.
+- **Auth**: `AuthGate` (rendered by `main.tsx`) sits above `App` — the dashboard and its WebSocket only mount with a valid, non-expired session in `localStorage` (`smokeguard-token` = `{token, expires_at}`). `LoginPage` posts to `/api/auth/login`; the header's Log out button clears the session. Token-required calls go through `authFetch` (`src/session.ts`), which attaches the bearer header and forces a re-login on 401. No reset UI (API-only by design).
 - **No charting libraries, no state management libraries** — pure Canvas 2D API rendering.
 
 ### Key Files
@@ -268,10 +293,14 @@ cd frontend && npm run build   # → dist/
 | `src/components/AirQualityPanel.tsx` | Bottom-right air-quality panel — numbers only: PM1.0/PM2.5/PM10 hero tiles, particle counts, RSSI, staleness dimming + offline badge |
 | `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia), main chart + bottom sensor panels, footer |
 | `src/types.ts` | `CsiFrame`, `SmokeSample`, `WsMessage`, `SubcarrierMetadata`, `MetricsSnapshot` |
+| `src/session.ts` | Admin session persistence — `saveSession`/`loadSession`/`clearSession`/`isSessionValid` (localStorage `smokeguard-token`) |
+| `src/theme.ts` | Shared `resolveTheme`/`applyTheme` (used by the auth gate and `App`) |
+| `src/components/AuthGate.tsx` | Auth gate above `App` — restores the session, renders `LoginPage` or the dashboard |
+| `src/components/LoginPage.tsx` | Admin sign-in card (login only; no reset flow) |
 
 ### Theme System
 
-CSS custom properties on `:root` (light) and `[data-theme="dark"]` (dark). The `App` component manages theme state and applies the attribute to `<html>`. The chart renderer receives a `Theme` prop (`'light' | 'dark'`) and selects an appropriate palette. Light mode uses white/green; dark mode uses black/green.
+CSS custom properties on `:root` (light) and `[data-theme="dark"]` (dark). The `App` component manages theme state and applies the attribute to `<html>` (shared helpers in `src/theme.ts`; the auth gate applies it for the login page too). The chart renderer receives a `Theme` prop (`'light' | 'dark'`) and selects an appropriate palette. Light mode uses white/green; dark mode uses black/green.
 
 All visual elements (cards, borders, text, chart background, grid lines) respond to the theme. Theme choice is persisted to `localStorage` key `smokeguard-theme`.
 
@@ -312,3 +341,5 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | Async queue size | 2000 | `main.py` consumer |
 | WS per-client queue | 256 | `ws_queue_maxsize` in Settings |
 | Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `mqtt_reader.py` |
+| JWT lifetime | 7 days | `jwt_expire_days` in Settings (`JWT_EXPIRE_DAYS`) |
+| Auth secrets | separate signing + reset secrets | `JWT_SECRET` / `PASSWORD_RESET_SECRET` in `.env` (generate: `scripts/setup_auth_secrets.sh`) |

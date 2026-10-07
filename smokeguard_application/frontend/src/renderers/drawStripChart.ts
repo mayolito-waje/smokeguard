@@ -90,15 +90,19 @@ function buildDataMask(
   numSub: number,
   meta: SubcarrierMetadata | null | undefined,
 ): boolean[] {
-  const mask = new Array<boolean>(numSub).fill(true);
-  if (!meta) return mask;
-  for (let j = 0; j < meta.data_start_idx && j < numSub; j++) mask[j] = false;
-  if (meta.dc_null_idx >= 0 && meta.dc_null_idx < numSub) {
-    mask[meta.dc_null_idx] = false;
-  }
-  if (meta.data_upper_end >= 0) {
-    for (let j = meta.data_upper_end + 1; j < numSub; j++) mask[j] = false;
-  }
+  if (!meta) return new Array<boolean>(numSub).fill(true);
+  // Data runs only. ESP-IDF stores CSI in FFT-bin order (DC null at index 0,
+  // then the sequence wraps to negatives), so guard bands can sit mid-array —
+  // mark exactly what the backend reports and nothing else. The clamp also
+  // absorbs the inverted/degenerate runs the dynamic fallback can emit.
+  const mask = new Array<boolean>(numSub).fill(false);
+  const markRun = (start: number, end: number) => {
+    const lo = Math.max(0, start);
+    const hi = Math.min(numSub - 1, end);
+    for (let j = lo; j <= hi; j++) mask[j] = true;
+  };
+  markRun(meta.data_start_idx, meta.data_end_idx);
+  markRun(meta.data_upper_start, meta.data_upper_end);
   return mask;
 }
 
@@ -106,7 +110,8 @@ function buildDataMask(
 // Subcarrier line colour
 // ---------------------------------------------------------------------------
 
-/** Spectral colour, mapped across the data subcarriers only. */
+/** Spectral colour, mapped across the data-index range — in FFT-bin order the
+ *  two data runs sit at opposite ends, leaving the guard gap mid-gradient. */
 export function lineColor(j: number, dataStart: number, dataEnd: number): string {
   const t = (j - dataStart) / Math.max(1, dataEnd - dataStart); // 0 … 1
   const hue = 225 - t * 218;                    // 225° (blue) → 7° (red)
