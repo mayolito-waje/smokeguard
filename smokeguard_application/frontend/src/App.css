@@ -1002,6 +1002,45 @@ body,
   color: var(--ink);
 }
 
+.detail-toolbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-delete-error {
+  font-size: 10px;
+  color: var(--err);
+  font-family: var(--font-mono);
+}
+
+.btn-delete {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--ink2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.btn-delete:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.btn-delete:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .detail-title {
   font-size: 15px;
   font-weight: 600;
@@ -1072,4 +1111,120 @@ body,
   .detail-tiles {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* ===================================================================
+   Login page (admin auth)
+   =================================================================== */
+
+.login-page {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-page);
+  padding: 24px;
+}
+
+.login-card {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--card-shadow);
+  padding: 26px 26px 22px;
+}
+
+.login-logo {
+  height: 110px;
+  object-fit: contain;
+  align-self: center;
+}
+
+.login-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: center;
+  margin-top: 4px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.login-field span {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--ink3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.login-input {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.login-input:focus {
+  border-color: var(--accent);
+}
+
+.login-error {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--err);
+}
+
+.btn-login {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn-login:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-login:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Logout button in the dashboard header (mirrors .btn-back sizing) */
+.btn-logout {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--ink2);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.btn-logout:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--ink);
 }

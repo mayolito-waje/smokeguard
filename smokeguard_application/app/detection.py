@@ -129,6 +129,9 @@ class DetectionManager:
         detected_at = time.time()
         csi_json = json.dumps(
             {
+                # v2 = ESP-IDF FFT-bin subcarrier mapping (DC at index 0);
+                # v1 events (pre-fix) stored the old ascending-order indices.
+                "snapshot_version": 2,
                 "subcarrier_count": csi_meta["subcarrier_count"],
                 "active_indices": csi_meta["active_indices"],
                 "frames": csi_snap,

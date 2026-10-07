@@ -20,6 +20,9 @@ influxdb_bin/
 # CSV data files
 *.csv
 
+# Parquet data exports
+*.parquet
+
 # IDE
 .vscode/
 .idea/

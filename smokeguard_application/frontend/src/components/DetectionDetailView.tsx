@@ -15,8 +15,9 @@ import { pickRandomSubcarriers, preprocessMatrix } from '../dsp/preprocess';
 import { drawDetectionCsiChart } from '../renderers/drawDetectionCsiChart';
 import { drawVocChart } from '../renderers/drawVocChart';
 import type { Theme } from '../renderers/drawStripChart';
+import { authFetch } from '../session';
 import type { StoredSmokeSample } from '../store/smokeStore';
-import type { DetectionEventDetail, DetectionSmokeSample } from '../types';
+import type { DetectionCsiFrame, DetectionEventDetail, DetectionSmokeSample } from '../types';
 
 // ---------------------------------------------------------------------------
 // Canvas setup (same DPR handling as WaterfallChart)
@@ -57,10 +58,30 @@ function fmtNum(v: number | null, digits = 1, suffix = ''): string {
   return v === null ? '—' : `${v.toFixed(digits)}${suffix}`;
 }
 
-/** Signed subcarrier number for an active-vector index. */
+/** Signed subcarrier number for an active-vector index. ESP-IDF FFT-bin order:
+ *  index 0 is DC, and indices >= wrap map to idx - subcarrierCount. */
 function signedScLabel(activeIndices: number[], subcarrierCount: number, subIdx: number): string {
-  const offset = Math.floor(subcarrierCount / 2); // DC position (32 for 64 SC)
-  return String(activeIndices[subIdx] - offset);
+  const idx = activeIndices[subIdx];
+  const wrap = Math.ceil(subcarrierCount / 2); // first negative subcarrier
+  return String(idx < wrap ? idx : idx - subcarrierCount);
+}
+
+/** Indices into the active-subcarrier vector whose traces carry signal.
+ *  The DC null and guard bands are always exactly zero; pre-fix events stored
+ *  them in `active_indices`, so filter them out before picking subcarriers. */
+function liveSubcarriers(frames: DetectionCsiFrame[]): number[] {
+  if (frames.length === 0) return [];
+  const n = frames[0].amp.length;
+  const live: number[] = [];
+  for (let j = 0; j < n; j++) {
+    for (const f of frames) {
+      if ((f.amp[j] ?? 0) > 0) {
+        live.push(j);
+        break;
+      }
+    }
+  }
+  return live;
 }
 
 interface TileProps {
@@ -98,6 +119,8 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picks, setPicks] = useState<number[]>([]);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const csiCanvasRef = useRef<HTMLCanvasElement>(null);
   const csiWrapRef = useRef<HTMLDivElement>(null);
@@ -122,7 +145,7 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
       .then((d: DetectionEventDetail) => {
         if (cancelled) return;
         setDetail(d);
-        setPicks(pickRandomSubcarriers(d.csi.frames.length > 0 ? d.csi.frames[0].amp.length : 0, 3));
+        setPicks(pickRandomSubcarriers(liveSubcarriers(d.csi.frames), 3));
       })
       .catch(e => {
         if (!cancelled) setError(e.message === 'not-found' ? 'Event not found' : 'Failed to load event detail');
@@ -155,6 +178,12 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
     if (!detail || detail.csi.frames.length === 0) return [];
     return preprocessMatrix(detail.csi.frames.map(f => f.amp));
   }, [detail]);
+
+  // ---- subcarriers with signal (DC/guard traces are flat zero — skip) ----
+  const live = useMemo(
+    () => (detail ? liveSubcarriers(detail.csi.frames) : []),
+    [detail],
+  );
 
   // ---- smoke aggregates + gas buffer ----
   const gasBuffer = useMemo<StoredSmokeSample[]>(() => {
@@ -240,6 +269,30 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
     }
   }, [gasBuffer, hasGas, sizes.gas, theme]);
 
+  // ---- delete the event (irreversible; confirm first) ----
+  async function handleDelete() {
+    if (!detail || deleting) return;
+    const ok = window.confirm(
+      `Delete detected event #${detail.id}? This removes it from the database and cannot be undone.`,
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await authFetch(`/api/detection/events/${detail.id}`, { method: 'DELETE' });
+      if (res.status === 404) throw new Error('not-found');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onBack();
+    } catch (e) {
+      setDeleteError(
+        e instanceof Error && e.message === 'not-found'
+          ? 'Event already deleted'
+          : 'Failed to delete event',
+      );
+      setDeleting(false);
+    }
+  }
+
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
@@ -258,6 +311,20 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
             </span>
           </>
         )}
+        <div className="detail-toolbar-right">
+          {deleteError && <span className="detail-delete-error">{deleteError}</span>}
+          {detail && (
+            <button
+              className="btn-delete"
+              onClick={handleDelete}
+              disabled={deleting}
+              title="Delete this event from the database"
+              aria-label="Delete this event"
+            >
+              🗑️
+            </button>
+          )}
+        </div>
       </div>
 
       {loading && <div className="history-status">Loading…</div>}
@@ -279,7 +346,7 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
                   </span>
                   <button
                     className="btn-simulate"
-                    onClick={() => setPicks(pickRandomSubcarriers(detail.csi.frames[0].amp.length, 3))}
+                    onClick={() => setPicks(pickRandomSubcarriers(live, 3))}
                   >
                     Reshuffle subcarriers
                   </button>

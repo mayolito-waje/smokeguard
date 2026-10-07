@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     influxdb_data_dir: str = "./influxdb_data"
 
     # Periodic cleanup — CSI data grows fast; readings older than this many
-    # days are deleted from InfluxDB (export CSVs first: scripts/export_influx_to_csv.py)
+    # days are deleted from InfluxDB (export first: scripts/export_csi_data_to_parquet.py)
     csi_retention_days: int = 7
     cleanup_interval_hours: float = 0.5  # 30 minutes
 
@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     detection_smoke_seconds: float = 17.0  # smoke/VOC window snapshotted at detection time
     dummy_trigger_min_s: float = 30.0      # dummy detector fires at random intervals
     dummy_trigger_max_s: float = 120.0     # in this range, when enabled
+
+    # Admin auth (PoC).  The two secrets are independent and generated once
+    # into the gitignored .env (scripts/setup_auth_secrets.sh) — required, so
+    # a misconfigured deployment fails fast at import instead of at login.
+    jwt_secret: str                        # HMAC key for bearer tokens
+    password_reset_secret: str             # second factor for the reset API
+    jwt_expire_days: int = 7
+    auth_db_path: str = "./auth.db"
 
     model_config = SettingsConfigDict(
         env_file=".env",

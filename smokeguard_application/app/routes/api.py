@@ -5,8 +5,9 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from app.auth import get_current_user
 from app.config import get_settings
 from app.models import (
     CleanupResponse,
@@ -155,13 +156,16 @@ async def get_readings_range(
 @router.get(
     "/cleanup",
     response_model=CleanupResponse,
-    responses={503: {"model": ErrorResponse}},
+    responses={401: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
 )
-async def cleanup_now(request: Request) -> CleanupResponse:
+async def cleanup_now(
+    request: Request, _user: str = Depends(get_current_user)
+) -> CleanupResponse:
     """Delete readings older than the retention window now (manual trigger).
 
-    The periodic task runs this on its own schedule; use this endpoint to
-    trigger it immediately, e.g. right after a CSV export.
+    Requires a bearer token (it deletes data).  The periodic task runs the
+    same cleanup on its own schedule; use this endpoint to trigger it
+    immediately, e.g. right after a CSV export.
     """
     influx_client = _get_influx(request)
     if not influx_client.connected:
@@ -170,4 +174,5 @@ async def cleanup_now(request: Request) -> CleanupResponse:
     days = get_settings().csi_retention_days
     if not influx_client.delete_older_than(days):
         raise HTTPException(status_code=503, detail="InfluxDB cleanup failed")
+    logger.info("Manual retention cleanup triggered by %s", _user)
     return CleanupResponse(retention_days=days)

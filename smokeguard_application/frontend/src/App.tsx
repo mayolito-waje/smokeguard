@@ -4,6 +4,7 @@ import { useSmokingFacts } from './hooks/useSmokingFacts';
 import { onMetrics, getMetrics } from './store/csiStore';
 import type { MetricsSnapshot } from './types';
 import type { Theme } from './renderers/drawStripChart';
+import { applyTheme, resolveTheme } from './theme';
 import StripChart from './components/WaterfallChart';
 import VocPanel from './components/VocPanel';
 import AirQualityPanel from './components/AirQualityPanel';
@@ -29,19 +30,15 @@ function wsStatusClass(state: string): string {
   return 'badge-err';
 }
 
-function resolveTheme(): Theme {
-  try {
-    const saved = localStorage.getItem('smokeguard-theme');
-    if (saved === 'light' || saved === 'dark') return saved;
-  } catch { /* localStorage unavailable */ }
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
-export default function App() {
+interface AppProps {
+  onLogout: () => void;
+}
+
+export default function App({ onLogout }: AppProps) {
   const { state, reconnect } = useWebSocket();
   const [metrics, setMetrics] = useState<MetricsSnapshot>(getMetrics());
   const [theme, setTheme] = useState<Theme>(resolveTheme);
@@ -53,8 +50,7 @@ export default function App() {
 
   // ---- Apply theme attribute on <html> ----
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    try { localStorage.setItem('smokeguard-theme', theme); } catch { /* noop */ }
+    applyTheme(theme);
   }, [theme]);
 
   // ---- Metrics subscription (throttled in store) ----
@@ -130,6 +126,9 @@ export default function App() {
             aria-label="Toggle colour theme"
           >
             {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          <button className="btn-logout" onClick={onLogout} title="End the admin session">
+            Log out
           </button>
         </div>
       </header>
