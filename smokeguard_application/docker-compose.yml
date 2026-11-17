@@ -1,0 +1,134 @@
+# SmokeGuard — dashboard + API + InfluxDB + Mosquitto in one stack.
+#
+#   docker compose up --build -d      # build and start
+#   docker compose ps                 # status
+#   docker compose logs -f backend    # logs
+#   docker compose down               # stop (data volumes kept)
+#   docker compose down -v            # stop and delete all data (destructive)
+#
+# A .env file next to this file is read for ${...} interpolation only; it is
+# never injected into containers wholesale. Container addresses (mqtt,
+# influxdb) are literals so a local .env with 127.0.0.1 values cannot break
+# the stack.
+#
+# Development defaults are used when a key is absent from .env. Change the
+# secrets/credentials for any real deployment.
+
+name: smokeguard
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    restart: unless-stopped
+    ports:
+      - "${INFLUX_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_ADMIN_USER:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD:-smokeguard-admin}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-smokeguard}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-csi_data}
+      DOCKER_INFLUXDB_INIT_RETENTION: 30d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-dev-influx-token-change-me}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    healthcheck:
+      # Verifies the token and the bucket, not just that the HTTP server is up.
+      test:
+        - CMD-SHELL
+        - >-
+          influx bucket list --host http://localhost:8086
+          --token "$$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"
+          --org "$$DOCKER_INFLUXDB_INIT_ORG"
+          --name "$$DOCKER_INFLUXDB_INIT_BUCKET" >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # One-shot: write the Mosquitto password file from the same credentials the
+  # backend and firmware use, then exit. Re-run with --force-recreate when the
+  # credentials change.
+  mosquitto-init:
+    image: eclipse-mosquitto:2
+    restart: "no"
+    entrypoint: ["/bin/sh", "/init-passwd.sh"]
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:-esp32}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-mosquitto}
+    volumes:
+      - mosquitto-auth:/mosquitto/auth
+      - ./mosquitto/init-passwd.sh:/init-passwd.sh:ro
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    user: "1883:1883"
+    depends_on:
+      mosquitto-init:
+        condition: service_completed_successfully
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - mosquitto-auth:/mosquitto/auth:ro
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - backend-data:/data
+    environment:
+      # Container-internal addresses are deliberately literals.
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: ${MQTT_USERNAME:-esp32}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-mosquitto}
+      MQTT_TOPIC_DATA: ${MQTT_TOPIC_DATA:-home/csi/data}
+      MQTT_TOPIC_STATUS: ${MQTT_TOPIC_STATUS:-home/csi/status}
+      MQTT_TOPIC_SMOKE: ${MQTT_TOPIC_SMOKE:-home/smoke_sensor/data}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-dev-influx-token-change-me}
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-smokeguard}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-csi_data}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+      PASSWORD_RESET_SECRET: ${PASSWORD_RESET_SECRET:-dev-reset-secret-change-me}
+      DETECTION_DB_PATH: /data/detection.db
+      AUTH_DB_PATH: /data/auth.db
+      TZ: ${TZ:-Asia/Manila}
+      REPORT_FACILITY: ${REPORT_FACILITY:-DLSU-D PBH320}
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:80"
+
+volumes:
+  backend-data:
+  influxdb-data:
+  mosquitto-auth:
