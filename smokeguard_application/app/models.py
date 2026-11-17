@@ -394,6 +394,8 @@ class DetectionEventSummary(BaseModel):
     p_csi: float | None = None
     p_sensor: float | None = None
     fused_score: float | None = None
+    csi_hit: bool | None = None
+    sensor_hit: bool | None = None
 
 
 class DetectionEventsResponse(BaseModel):
@@ -416,6 +418,8 @@ class DetectionEventDetail(BaseModel):
     p_csi: float | None = None
     p_sensor: float | None = None
     fused_score: float | None = None
+    csi_hit: bool | None = None
+    sensor_hit: bool | None = None
     csi: dict
     smoke: dict
 

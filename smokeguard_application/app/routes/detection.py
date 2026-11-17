@@ -3,12 +3,11 @@
 import logging
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from app import inference
 from app.auth import get_current_user
 from app.detection import BaselineCaptureError
-
 from app.models import (
     BaselineCaptureResponse,
     DetectionConfigResponse,
@@ -20,6 +19,7 @@ from app.models import (
     DetectionLabel,
     ErrorResponse,
 )
+from app.report import build_monthly_report_pdf
 
 if TYPE_CHECKING:
     from app.detection import DetectionManager
@@ -151,6 +151,45 @@ async def list_detection_events(
         month=month,
         count=len(events),
         events=[DetectionEventSummary(**e) for e in events],
+    )
+
+
+@router.get(
+    "/report",
+    responses={500: {"model": ErrorResponse}},
+)
+def download_monthly_report(
+    request: Request,
+    year: int = Query(..., ge=1970, le=2100, description="Year, e.g. 2026"),
+    month: int = Query(..., ge=1, le=12, description="Month 1-12"),
+) -> Response:
+    """Monthly detection PDF (all classes), read-only like the event listing."""
+    store = _get_store(request)
+    settings = request.app.state.settings  # type: ignore[attr-defined]
+    events = store.list_events_for_report(year, month)
+    try:
+        pdf_bytes = build_monthly_report_pdf(
+            year=year,
+            month=month,
+            events=events,
+            sensor_prob_threshold=settings.sensor_prob_threshold,
+            fusion_score_threshold=settings.fusion_score_threshold,
+            facility=settings.report_facility,
+            logo_path=settings.report_logo_path,
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate the monthly detection report")
+        raise HTTPException(
+            status_code=500, detail="Failed to generate report"
+        ) from exc
+    filename = f"smokeguard-detection-report-{year}-{month:02d}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

@@ -636,6 +636,37 @@ def predict_csi(features: np.ndarray) -> CsiResult:
     )
 
 
+def predict_csi_from_snapshot(
+    payload: dict, background: np.ndarray | None
+) -> CsiResult | None:
+    """Re-score a stored v2 CSI snapshot (best-effort legacy backfill).
+
+    The snapshot holds amplitude-only frames (rounded to 2 dp) for the active
+    subcarriers of the window that produced the original decision. Repeating
+    the preprocessing chain reproduces the model input; slight rounding and a
+    possibly recaptured static background mean the result is a reconstruction,
+    not the original call. Returns None when it cannot be re-scored (pre-fix
+    subcarrier mapping, degenerate frames, or the CSI model is not loaded).
+    """
+    if payload.get("snapshot_version") != 2:
+        return None
+    if _state["csi"] is None:
+        return None
+    frames = payload.get("frames") or []
+    if len(frames) < 2:
+        return None
+    try:
+        t = np.asarray([float(frame["t"]) for frame in frames], dtype=np.float64)
+        amp = np.asarray([frame["amp"] for frame in frames], dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        return None
+    try:
+        features = preprocess_csi_window(t, amp, background)
+    except (TypeError, ValueError):
+        return None
+    return predict_csi(features)
+
+
 def _stable_sigmoid(x: np.ndarray) -> np.ndarray:
     """Overflow-safe logistic function (Platt slopes can be large)."""
     x = np.asarray(x, dtype=np.float64)

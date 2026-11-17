@@ -118,6 +118,8 @@ export interface DetectionEventSummary {
   p_csi: number | null;
   p_sensor: number | null;
   fused_score: number | null;
+  csi_hit: boolean | null;
+  sensor_hit: boolean | null;
 }
 
 export interface DetectionEventsResponse {
@@ -168,6 +170,8 @@ export interface DetectionEventDetail {
   p_csi: number | null;
   p_sensor: number | null;
   fused_score: number | null;
+  csi_hit: boolean | null;
+  sensor_hit: boolean | null;
   csi: DetectionCsiData;
   smoke: { samples: DetectionSmokeSample[] };
 }

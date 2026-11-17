@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # hit over the fused threshold; equal weights require real CSI evidence.
     fusion_csi_weight: float = 0.50        # sensor weight = 1 - this
 
+    # Monthly PDF report (Detection History -> Download PDF report).
+    report_facility: str = "DLSU-D PBH320"
+    report_logo_path: str = "frontend/public/smokeguard_logo.png"
+
     # Admin auth (PoC).  The two secrets are independent and generated once
     # into the gitignored .env (scripts/setup_auth_secrets.sh) — required, so
     # a misconfigured deployment fails fast at import instead of at login.

@@ -39,6 +39,8 @@ export default function HistoryView({ onOpen }: Props) {
   const [data, setData] = useState<DetectionEventsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   // Year range covers the sample replay data (captured Sep 2026)
   const years: number[] = [];
@@ -65,6 +67,30 @@ export default function HistoryView({ onOpen }: Props) {
       });
     return () => { cancelled = true; };
   }, [year, month, label]);
+
+  async function downloadReport(): Promise<void> {
+    setReportLoading(true);
+    setReportError(null);
+    try {
+      const res = await fetch(
+        `/api/detection/report?year=${year}&month=${month}`,
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `smokeguard-detection-report-${year}-${String(month).padStart(2, '0')}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setReportError('Failed to generate the PDF report');
+    } finally {
+      setReportLoading(false);
+    }
+  }
 
   return (
     <div className="history-view">
@@ -100,11 +126,22 @@ export default function HistoryView({ onOpen }: Props) {
             <option value="smoke_only">Sensor only (possible)</option>
             <option value="csi_only">CSI only (experimental)</option>
           </select>
+          <button
+            className="btn-report"
+            onClick={downloadReport}
+            disabled={reportLoading}
+            title="Downloads the full monthly report (all detection classes)"
+          >
+            {reportLoading ? 'Preparing PDF…' : 'Download PDF report'}
+          </button>
         </div>
       </div>
 
       {loading && <div className="history-status">Loading…</div>}
       {error && <div className="history-status history-error">{error}</div>}
+      {reportError && (
+        <div className="history-status history-error">{reportError}</div>
+      )}
 
       {!loading && !error && data && data.count === 0 && (
         <div className="history-status">

@@ -849,7 +849,8 @@ body,
   color: var(--ink3);
 }
 
-.btn-simulate {
+.btn-simulate,
+.btn-report {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-raised);
@@ -861,13 +862,15 @@ body,
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
-.btn-simulate:hover:not(:disabled) {
+.btn-simulate:hover:not(:disabled),
+.btn-report:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
   color: var(--ink);
 }
 
-.btn-simulate:disabled {
+.btn-simulate:disabled,
+.btn-report:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -925,6 +928,8 @@ body,
 
 .history-selects {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 

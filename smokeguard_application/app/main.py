@@ -60,6 +60,8 @@ def create_app() -> FastAPI:
         description="Wi-Fi CSI smoke detection — data ingestion and streaming API",
         version="0.1.0",
     )
+    # Public settings handle for routes (report rendering, etc.).
+    app.state.settings = settings
 
     # ------------------------------------------------------------------
     # CORS — allow React dev server and production builds

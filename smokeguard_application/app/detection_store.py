@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS detection_events (
     label TEXT NOT NULL DEFAULT 'fusion',  -- 'fusion' | 'smoke_only' | 'csi_only'
     p_csi REAL,                         -- calibrated P(smoke) from the CSI model
     p_sensor REAL,                      -- SVM P(smoke)
-    fused_score REAL                    -- 0.3*p_csi + 0.7*p_sensor; NULL for csi_only
+    fused_score REAL                    -- weighted CSI+sensor score; NULL for csi_only
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -52,6 +52,10 @@ _MIGRATION_COLUMNS = {
     "p_csi": "REAL",
     "p_sensor": "REAL",
     "fused_score": "REAL",
+    # Model gate flags (NULL on events recorded before they were persisted;
+    # scripts/backfill_detection_hits.py fills them from stored snapshots).
+    "csi_hit": "INTEGER",
+    "sensor_hit": "INTEGER",
 }
 
 _DETECTION_ENABLED_KEY = "detection_enabled"
@@ -73,7 +77,7 @@ class DetectionStore:
         logger.info("Detection store ready at %s", db_path)
 
     def _migrate(self) -> None:
-        """Add label/probability columns to DBs created before they existed."""
+        """Add label/probability/gate columns to DBs created before them."""
         existing = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(detection_events)")
@@ -165,17 +169,22 @@ class DetectionStore:
         p_csi: float | None,
         p_sensor: float | None,
         fused_score: float | None,
+        csi_hit: bool | None = None,
+        sensor_hit: bool | None = None,
     ) -> int:
         """Insert a detection event (csi_json/smoke_json pre-serialized)."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO detection_events "
                 "(detected_at, csi_frames, smoke_samples, csi_json, smoke_json, "
-                "created_at, label, p_csi, p_sensor, fused_score) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, label, p_csi, p_sensor, fused_score, csi_hit, "
+                "sensor_hit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     detected_at, csi_frames, smoke_samples, csi_json, smoke_json,
                     datetime.now().timestamp(), label, p_csi, p_sensor, fused_score,
+                    None if csi_hit is None else int(csi_hit),
+                    None if sensor_hit is None else int(sensor_hit),
                 ),
             )
             self._conn.commit()
@@ -198,7 +207,7 @@ class DetectionStore:
         start, end = self._month_bounds(year, month)
         query = (
             "SELECT id, detected_at, csi_frames, smoke_samples, "
-            "label, p_csi, p_sensor, fused_score "
+            "label, p_csi, p_sensor, fused_score, csi_hit, sensor_hit "
             "FROM detection_events "
             "WHERE detected_at >= ? AND detected_at < ?"
         )
@@ -219,6 +228,39 @@ class DetectionStore:
                 "p_csi": row[5],
                 "p_sensor": row[6],
                 "fused_score": row[7],
+                "csi_hit": None if row[8] is None else bool(row[8]),
+                "sensor_hit": None if row[9] is None else bool(row[9]),
+            }
+            for row in rows
+        ]
+
+    def list_events_for_report(self, year: int, month: int) -> list[dict]:
+        """Monthly rows for the PDF report, oldest first, with avg PM2.5.
+
+        Reads the smoke snapshot blob to average PM2.5 (small: one window per
+        event); the much larger CSI blob is left untouched.
+        """
+        start, end = self._month_bounds(year, month)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, detected_at, label, p_csi, p_sensor, fused_score, "
+                "csi_hit, sensor_hit, smoke_json "
+                "FROM detection_events "
+                "WHERE detected_at >= ? AND detected_at < ? "
+                "ORDER BY detected_at ASC",
+                (start, end),
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "detected_at": row[1],
+                "label": row[2],
+                "p_csi": row[3],
+                "p_sensor": row[4],
+                "fused_score": row[5],
+                "csi_hit": None if row[6] is None else bool(row[6]),
+                "sensor_hit": None if row[7] is None else bool(row[7]),
+                "avg_pm2_5": _mean_pm2_5(row[8]),
             }
             for row in rows
         ]
@@ -228,7 +270,8 @@ class DetectionStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT id, detected_at, csi_frames, smoke_samples, csi_json, "
-                "smoke_json, label, p_csi, p_sensor, fused_score "
+                "smoke_json, label, p_csi, p_sensor, fused_score, csi_hit, "
+                "sensor_hit "
                 "FROM detection_events WHERE id = ?",
                 (event_id,),
             ).fetchone()
@@ -245,6 +288,8 @@ class DetectionStore:
             "p_csi": row[7],
             "p_sensor": row[8],
             "fused_score": row[9],
+            "csi_hit": None if row[10] is None else bool(row[10]),
+            "sensor_hit": None if row[11] is None else bool(row[11]),
         }
 
     def delete_event(self, event_id: int) -> bool:
@@ -255,3 +300,78 @@ class DetectionStore:
             )
             self._conn.commit()
             return cur.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Gate-flag backfill (legacy events)
+    # ------------------------------------------------------------------
+
+    def list_events_missing_hits(self) -> list[dict]:
+        """Rows whose csi_hit / sensor_hit flags are not filled in yet."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, detected_at, label, p_csi, p_sensor, csi_json "
+                "FROM detection_events "
+                "WHERE csi_hit IS NULL OR sensor_hit IS NULL "
+                "ORDER BY detected_at ASC"
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "detected_at": row[1],
+                "label": row[2],
+                "p_csi": row[3],
+                "p_sensor": row[4],
+                "csi_json": row[5],
+            }
+            for row in rows
+        ]
+
+    def update_event_hits(
+        self,
+        event_id: int,
+        *,
+        csi_hit: bool | None = None,
+        sensor_hit: bool | None = None,
+    ) -> bool:
+        """Set gate flags for one row; None leaves that column unchanged."""
+        assignments: list[str] = []
+        params: list = []
+        if csi_hit is not None:
+            assignments.append("csi_hit = ?")
+            params.append(int(csi_hit))
+        if sensor_hit is not None:
+            assignments.append("sensor_hit = ?")
+            params.append(int(sensor_hit))
+        if not assignments:
+            return False
+        params.append(event_id)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE detection_events SET {', '.join(assignments)} "
+                "WHERE id = ?",
+                params,
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+
+def _mean_pm2_5(smoke_json: str | None) -> float | None:
+    """Mean PM2.5 over a stored smoke-window snapshot (None when unavailable)."""
+    if not smoke_json:
+        return None
+    try:
+        samples = json.loads(smoke_json).get("samples") or []
+    except (AttributeError, TypeError, ValueError):
+        return None
+    values: list[float] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        value = sample.get("pm2_5")
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return sum(values) / len(values) if values else None

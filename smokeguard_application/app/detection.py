@@ -388,6 +388,8 @@ class DetectionManager:
                 p_csi=decision.p_csi,
                 p_sensor=decision.p_sensor,
                 fused_score=decision.fused_score,
+                csi_hit=decision.csi_hit,
+                sensor_hit=decision.sensor_hit,
             )
             self._last_alert_event_id = event_id
             if superseded_id is not None and superseded_id != event_id:
