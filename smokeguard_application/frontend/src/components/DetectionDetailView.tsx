@@ -3,21 +3,52 @@
  * window.
  *
  * CSI: preprocessed with the notebook pipeline (Hampel → Butterworth →
- * Gaussian) and drawn with 3 random subcarriers, original (dotted) vs
- * preprocessed (solid) over normalized time.
+ * Gaussian) and drawn with user-selected subcarriers (default 1–5),
+ * original (dotted) vs preprocessed (solid) over normalized time.  A
+ * checklist toggles any of the 52 active subcarriers.
  *
  * Smoke/VOC: gas-resistance chart (drawVocChart, static buffer) plus
- * average tiles for the other metrics.
+ * average tiles for the other metrics.  Graphs sit on the left, the
+ * air-quality averages on the right.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { pickRandomSubcarriers, preprocessMatrix } from '../dsp/preprocess';
+import { preprocessMatrix } from '../dsp/preprocess';
 import { drawDetectionCsiChart } from '../renderers/drawDetectionCsiChart';
 import { drawVocChart } from '../renderers/drawVocChart';
 import type { Theme } from '../renderers/drawStripChart';
 import { authFetch } from '../session';
 import type { StoredSmokeSample } from '../store/smokeStore';
-import type { DetectionCsiFrame, DetectionEventDetail, DetectionSmokeSample } from '../types';
+import type {
+  DetectionCsiFrame,
+  DetectionEventDetail,
+  DetectionLabel,
+  DetectionSmokeSample,
+} from '../types';
+
+const TITLE_TEXT: Record<DetectionLabel, string> = {
+  fusion: 'Detected Smoking Activity',
+  smoke_only: 'Possible Smoking Activity',
+  csi_only: 'CSI-Only Smoking Gesture (experimental)',
+};
+
+const BADGE_TEXT: Record<DetectionLabel, string> = {
+  fusion: 'CSI + smoke sensor',
+  smoke_only: 'Sensor only',
+  csi_only: 'CSI only',
+};
+
+/** Default plot selection: subcarriers 1–5. */
+const DEFAULT_PICK_COUNT = 5;
+
+function defaultPicks(live: number[], total: number): number[] {
+  if (total <= 0) return [];
+  const count = Math.min(DEFAULT_PICK_COUNT, total);
+  const picked = live.slice(0, count);
+  return picked.length > 0
+    ? picked
+    : Array.from({ length: count }, (_, i) => i);
+}
 
 // ---------------------------------------------------------------------------
 // Canvas setup (same DPR handling as WaterfallChart)
@@ -62,6 +93,7 @@ function fmtNum(v: number | null, digits = 1, suffix = ''): string {
  *  index 0 is DC, and indices >= wrap map to idx - subcarrierCount. */
 function signedScLabel(activeIndices: number[], subcarrierCount: number, subIdx: number): string {
   const idx = activeIndices[subIdx];
+  if (idx === undefined) return '—';
   const wrap = Math.ceil(subcarrierCount / 2); // first negative subcarrier
   return String(idx < wrap ? idx : idx - subcarrierCount);
 }
@@ -119,11 +151,13 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picks, setPicks] = useState<number[]>([]);
+  const [selectorOpen, setSelectorOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const csiCanvasRef = useRef<HTMLCanvasElement>(null);
   const csiWrapRef = useRef<HTMLDivElement>(null);
+  const selectorRef = useRef<HTMLDivElement>(null);
   const gasCanvasRef = useRef<HTMLCanvasElement>(null);
   const gasWrapRef = useRef<HTMLDivElement>(null);
   const [sizes, setSizes] = useState<{ csi: [number, number]; gas: [number, number] }>({
@@ -145,7 +179,8 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
       .then((d: DetectionEventDetail) => {
         if (cancelled) return;
         setDetail(d);
-        setPicks(pickRandomSubcarriers(liveSubcarriers(d.csi.frames), 3));
+        const total = d.csi.frames[0]?.amp.length ?? 0;
+        setPicks(defaultPicks(liveSubcarriers(d.csi.frames), total));
       })
       .catch(e => {
         if (!cancelled) setError(e.message === 'not-found' ? 'Event not found' : 'Failed to load event detail');
@@ -155,6 +190,25 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
       });
     return () => { cancelled = true; };
   }, [id]);
+
+  // ---- close the subcarrier selector on outside click / Escape ----
+  useEffect(() => {
+    if (!selectorOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (selectorRef.current && !selectorRef.current.contains(e.target as Node)) {
+        setSelectorOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectorOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [selectorOpen]);
 
   // ---- keep canvas sizes in sync with their containers ----
   useEffect(() => {
@@ -184,6 +238,12 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
     () => (detail ? liveSubcarriers(detail.csi.frames) : []),
     [detail],
   );
+
+  // ---- every slot in the active vector (52 for a valid HT40 frame) ----
+  const allIndices = useMemo(() => {
+    const n = detail?.csi.frames[0]?.amp.length ?? 0;
+    return Array.from({ length: n }, (_, i) => i);
+  }, [detail]);
 
   // ---- smoke aggregates + gas buffer ----
   const gasBuffer = useMemo<StoredSmokeSample[]>(() => {
@@ -235,7 +295,7 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
     drawDetectionCsiChart(ctx, w, h, {
       picks: picks.map(subIdx => ({
         subIdx,
-        label: signedScLabel(detail.csi.active_indices, detail.csi.subcarrier_count, subIdx),
+        label: String(subIdx + 1),
       })),
       frames: detail.csi.frames,
       processed: picks.map(subIdx => processed.map(f => f[subIdx])),
@@ -268,6 +328,15 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
       ctx.fillText('No smoke sensor data captured for this event', w / 2, h / 2);
     }
   }, [gasBuffer, hasGas, sizes.gas, theme]);
+
+  // ---- subcarrier checklist ----
+  function togglePick(subIdx: number) {
+    setPicks(prev =>
+      prev.includes(subIdx)
+        ? prev.filter(p => p !== subIdx)
+        : [...prev, subIdx].sort((a, b) => a - b),
+    );
+  }
 
   // ---- delete the event (irreversible; confirm first) ----
   async function handleDelete() {
@@ -303,11 +372,24 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
         <button className="btn-back" onClick={onBack}>← Back</button>
         {detail && (
           <>
-            <span className="detail-title">Detected Smoking Activity #{detail.id}</span>
+            <span className="detail-title">
+              {TITLE_TEXT[detail.label]} #{detail.id}
+              <span className={`event-label label-${detail.label}`}>
+                {BADGE_TEXT[detail.label]}
+              </span>
+            </span>
             <span className="detail-meta">
               {new Date(detail.detected_at * 1000).toLocaleString()}
               {' · '}{detail.csi_frames} CSI frames
               {' · '}{detail.smoke_samples} AQI + VOC data
+              {' · '}CSI {detail.csi.window_seconds !== undefined
+                ? `${detail.csi.window_seconds.toFixed(1)} s window`
+                : (detail.csi.frames.length > 1
+                  ? `${(detail.csi.frames[detail.csi.frames.length - 1].t - detail.csi.frames[0].t).toFixed(1)} s window`
+                  : '—')}
+              {' · '}CSI {detail.p_csi === null ? '—' : detail.p_csi.toFixed(2)}
+              {' · '}Sensor {detail.p_sensor === null ? '—' : detail.p_sensor.toFixed(2)}
+              {' · '}Score {detail.fused_score === null ? '—' : detail.fused_score.toFixed(2)}
             </span>
           </>
         )}
@@ -331,63 +413,120 @@ export default function DetectionDetailView({ id, theme, onBack }: Props) {
       {error && <div className="history-status history-error">{error}</div>}
 
       {!loading && !error && detail && (
-        <>
-          <div className="detail-section">
-            <div className="detail-section-header">
-              <span className="detail-section-title">Preprocessed CSI</span>
-              {detail.csi.frames.length > 0 && (
-                <div className="detail-controls">
-                  <span className="detail-meta">
-                    {detail.csi.frames.length} frames
-                    {' · '}
-                    {detail.csi.frames.length > 1
-                      ? (detail.csi.frames[detail.csi.frames.length - 1].t - detail.csi.frames[0].t).toFixed(1) + ' s'
-                      : '0 s'}
-                  </span>
-                  <button
-                    className="btn-simulate"
-                    onClick={() => setPicks(pickRandomSubcarriers(live, 3))}
-                  >
-                    Reshuffle subcarriers
-                  </button>
+        <div className="detail-columns">
+          <div className="detail-column">
+            <div className="detail-section">
+              <div className="detail-section-header">
+                <span className="detail-section-title">Preprocessed CSI</span>
+                {detail.csi.frames.length > 0 && (
+                  <div className="detail-controls">
+                    <span className="detail-meta">
+                      {detail.csi.frames.length} frames
+                      {' · '}
+                      {detail.csi.frames.length > 1
+                        ? (detail.csi.frames[detail.csi.frames.length - 1].t - detail.csi.frames[0].t).toFixed(1) + ' s'
+                        : '0 s'}
+                    </span>
+                    <div className="sc-select" ref={selectorRef}>
+                      <button
+                        type="button"
+                        className="btn-simulate"
+                        onClick={() => setSelectorOpen(open => !open)}
+                        aria-haspopup="dialog"
+                        aria-expanded={selectorOpen}
+                      >
+                        Select subcarriers ({picks.length})
+                      </button>
+                      {selectorOpen && (
+                        <div className="sc-select-panel" role="dialog" aria-label="Select subcarriers">
+                          <div className="sc-select-actions">
+                            <button
+                              type="button"
+                              className="sc-select-action"
+                              onClick={() => setPicks(allIndices)}
+                              disabled={allIndices.length === 0}
+                            >
+                              All
+                            </button>
+                            <button
+                              type="button"
+                              className="sc-select-action"
+                              onClick={() => setPicks([])}
+                              disabled={picks.length === 0}
+                            >
+                              Clear
+                            </button>
+                            <button
+                              type="button"
+                              className="sc-select-action"
+                              onClick={() => setPicks(defaultPicks(live, allIndices.length))}
+                            >
+                              1–5
+                            </button>
+                          </div>
+                          <div className="sc-select-list">
+                            {allIndices.map(subIdx => (
+                              <label key={subIdx} className="sc-select-row">
+                                <input
+                                  type="checkbox"
+                                  checked={picks.includes(subIdx)}
+                                  onChange={() => togglePick(subIdx)}
+                                />
+                                <span className="sc-select-name">Subcarrier {subIdx + 1}</span>
+                                <span className="sc-select-sc">
+                                  sc {signedScLabel(
+                                    detail.csi.active_indices,
+                                    detail.csi.subcarrier_count,
+                                    subIdx,
+                                  )}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="detail-csi-wrap" ref={csiWrapRef}>
+                <canvas ref={csiCanvasRef} />
+              </div>
+            </div>
+
+            <div className="detail-section">
+              <div className="detail-section-header">
+                <span className="detail-section-title">VOC — gas resistance</span>
+                <span className="detail-meta">{gasBuffer.length} samples</span>
+              </div>
+              <div className="detail-gas-wrap" ref={gasWrapRef}>
+                <canvas ref={gasCanvasRef} />
+              </div>
+            </div>
+          </div>
+
+          <div className="detail-column detail-column-averages">
+            <div className="detail-section">
+              <div className="detail-section-header">
+                <span className="detail-section-title">Air quality — window averages</span>
+              </div>
+              {detail.smoke.samples.length === 0 ? (
+                <div className="detail-meta">No smoke sensor data captured for this event</div>
+              ) : (
+                <div className="detail-tiles">
+                  <AvgTile label="PM1.0" value={avgs?.pm1_0 ?? null} digits={0} />
+                  <AvgTile label="PM2.5" value={avgs?.pm2_5 ?? null} digits={0} />
+                  <AvgTile label="PM10" value={avgs?.pm10 ?? null} digits={0} />
+                  <AvgTile label="Temperature" value={avgs?.temp_c ?? null} suffix=" °C" />
+                  <AvgTile label="Pressure" value={avgs?.pressure_hpa ?? null} suffix=" hPa" />
+                  <AvgTile label="Humidity" value={avgs?.humidity_pct ?? null} suffix=" %" />
+                  <AvgTile label="Altitude" value={avgs?.altitude_m ?? null} suffix=" m" />
+                  <AvgTile label="RSSI" value={avgs?.rssi ?? null} digits={0} suffix=" dBm" />
                 </div>
               )}
             </div>
-            <div className="detail-csi-wrap" ref={csiWrapRef}>
-              <canvas ref={csiCanvasRef} />
-            </div>
           </div>
-
-          <div className="detail-section">
-            <div className="detail-section-header">
-              <span className="detail-section-title">VOC — gas resistance</span>
-              <span className="detail-meta">{gasBuffer.length} samples</span>
-            </div>
-            <div className="detail-gas-wrap" ref={gasWrapRef}>
-              <canvas ref={gasCanvasRef} />
-            </div>
-          </div>
-
-          <div className="detail-section">
-            <div className="detail-section-header">
-              <span className="detail-section-title">Air quality — window averages</span>
-            </div>
-            {detail.smoke.samples.length === 0 ? (
-              <div className="detail-meta">No smoke sensor data captured for this event</div>
-            ) : (
-              <div className="detail-tiles">
-                <AvgTile label="PM1.0" value={avgs?.pm1_0 ?? null} digits={0} />
-                <AvgTile label="PM2.5" value={avgs?.pm2_5 ?? null} digits={0} />
-                <AvgTile label="PM10" value={avgs?.pm10 ?? null} digits={0} />
-                <AvgTile label="Temperature" value={avgs?.temp_c ?? null} suffix=" °C" />
-                <AvgTile label="Pressure" value={avgs?.pressure_hpa ?? null} suffix=" hPa" />
-                <AvgTile label="Humidity" value={avgs?.humidity_pct ?? null} suffix=" %" />
-                <AvgTile label="Altitude" value={avgs?.altitude_m ?? null} suffix=" m" />
-                <AvgTile label="RSSI" value={avgs?.rssi ?? null} digits={0} suffix=" dBm" />
-              </div>
-            )}
-          </div>
-        </>
+        </div>
       )}
     </div>
   );

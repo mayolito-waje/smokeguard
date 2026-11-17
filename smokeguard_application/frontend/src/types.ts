@@ -73,10 +73,21 @@ export interface SmokeSample {
   rssi: number;
 }
 
+/**
+ * Detection class (weakest first):
+ * csi_only = experimental CSI gesture, no sensor confirmation;
+ * smoke_only = sensor-only hit; fusion = CSI + sensor agree.
+ */
+export type DetectionLabel = 'csi_only' | 'smoke_only' | 'fusion';
+
 export interface WsAlert {
   type: 'alert';
   id: number;
   detected_at: number;
+  label: DetectionLabel;
+  p_csi: number | null;
+  p_sensor: number | null;
+  fused_score: number | null;
 }
 
 export type WsMessage = WsWelcome | CsiFrame | SmokeSample | WsStatus | WsAlert | { type: 'pong' };
@@ -85,8 +96,17 @@ export type WsMessage = WsWelcome | CsiFrame | SmokeSample | WsStatus | WsAlert 
 // Detection API types (REST /api/detection/*)
 // ---------------------------------------------------------------------------
 
+export interface BaselineStatus {
+  captured_at: number;
+  packet_count: number;
+  csi_seconds: number;
+}
+
 export interface DetectionConfig {
   enabled: boolean;
+  csi_only_enabled: boolean;
+  baseline_status: BaselineStatus | null;
+  models_ready: boolean;
 }
 
 export interface DetectionEventSummary {
@@ -94,6 +114,12 @@ export interface DetectionEventSummary {
   detected_at: number;
   csi_frames: number;
   smoke_samples: number;
+  label: DetectionLabel;
+  p_csi: number | null;
+  p_sensor: number | null;
+  fused_score: number | null;
+  csi_hit: boolean | null;
+  sensor_hit: boolean | null;
 }
 
 export interface DetectionEventsResponse {
@@ -111,6 +137,8 @@ export interface DetectionCsiFrame {
 export interface DetectionCsiData {
   subcarrier_count: number;
   active_indices: number[];
+  /** Chosen CSI window length (4–7 s scan); absent on pre-scan events. */
+  window_seconds?: number;
   frames: DetectionCsiFrame[];
 }
 
@@ -138,6 +166,12 @@ export interface DetectionEventDetail {
   detected_at: number;
   csi_frames: number;
   smoke_samples: number;
+  label: DetectionLabel;
+  p_csi: number | null;
+  p_sensor: number | null;
+  fused_score: number | null;
+  csi_hit: boolean | null;
+  sensor_hit: boolean | null;
   csi: DetectionCsiData;
   smoke: { samples: DetectionSmokeSample[] };
 }

@@ -1,0 +1,34 @@
+# Never bake local secrets or runtime data into the image.
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+
+# Local virtualenv / caches
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+
+# Host-only data and binaries
+influxdb_bin
+influxdb_data
+raw_sensor_data
+sample_csv_output
+
+# Frontend build inputs are not needed by the backend; only frontend/public
+# (the report logo) is copied.
+frontend/node_modules
+frontend/dist
+frontend/src
+frontend/package.json
+frontend/package-lock.json
+frontend/tsconfig*.json
+frontend/vite.config.ts
+frontend/index.html
+
+# Dev-only
+tests
+.git
+.gitignore

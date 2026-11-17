@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,12 +54,49 @@ class Settings(BaseSettings):
     # WebSocket per-client queue size (oldest dropped when full)
     ws_queue_maxsize: int = 256
 
-    # Smoking-activity detection (dummy until the real models exist)
+    # Smoking-activity detection (real ML pipeline — see app/inference.py)
     detection_db_path: str = "./detection.db"
-    detection_csi_seconds: float = 7.0    # CSI window snapshotted at detection time
-    detection_smoke_seconds: float = 17.0  # smoke/VOC window snapshotted at detection time
-    dummy_trigger_min_s: float = 30.0      # dummy detector fires at random intervals
-    dummy_trigger_max_s: float = 120.0     # in this range, when enabled
+    # Window lengths.  The smoke window is the last 14.905 s of sensor
+    # samples; the CSI window always starts at the same instant (t0) and its
+    # duration is scanned over candidates between min and max (gestures last
+    # 4-7 s).  The most confident candidate is used.
+    detection_csi_min_seconds: float = 4.0
+    detection_csi_max_seconds: float = 7.0
+    detection_csi_step_seconds: float = 0.5
+    detection_smoke_seconds: float = 14.905367895113585
+    detection_sensor_baseline_seconds: float = 600.0  # causal baseline before window
+    detection_interval_s: float = 0.2      # evaluation cadence
+    detection_cooldown_s: float = 30.0     # alert dedupe (record-timestamp domain)
+    detection_csi_min_packets: int = 200   # min raw CSI packets to run the model
+    detection_smoke_min_window: int = 8    # notebook requirement
+    detection_smoke_min_baseline: int = 30  # notebook requirement
+    detection_baseline_min_packets: int = 300  # static-background capture minimum
+
+    # Experimental CSI-only class (sensor below gate, CSI sees a smoking
+    # gesture). Enabled at runtime via the SQLite toggle, not here.
+    detection_csi_only_min_prob: float = 0.0  # extra confidence gate (0 = off)
+    detection_csi_only_interval_s: float = 1.0  # CSI-only scan rate cap
+
+    # Model artifacts (paths relative to the backend working directory).
+    # The CSI checkpoint is the seven-class ResNet-LSTM; its Platt calibrator
+    # JSON must list the same classes in the same order.
+    csi_model_path: str = "models/csi_resnet_lstm_7class.keras"
+    csi_platt_path: str = "models/csi_resnet_lstm_7class.platt.json"
+    smoke_model_path: str = "models/smoke_svm_pipeline.joblib"
+
+    # Decision thresholds / fusion weights (from the fusion notebook).
+    # The sensor gate is the SVM's F1-max OOF threshold from the sensor
+    # notebook (theta = 0.4049989698494056 for the 2026-11-08 checkpoint).
+    sensor_prob_threshold: float = 0.4049989698494056
+    fusion_score_threshold: float = 0.70
+    # Balanced CSI/sensor weights.  The notebook's 0.3/0.7 favoured the
+    # sensor so heavily that a high p_sensor alone could carry a weak CSI
+    # hit over the fused threshold; equal weights require real CSI evidence.
+    fusion_csi_weight: float = 0.50        # sensor weight = 1 - this
+
+    # Monthly PDF report (Detection History -> Download PDF report).
+    report_facility: str = "DLSU-D PBH320"
+    report_logo_path: str = "frontend/public/smokeguard_logo.png"
 
     # Admin auth (PoC).  The two secrets are independent and generated once
     # into the gitignored .env (scripts/setup_auth_secrets.sh) — required, so
@@ -72,7 +110,37 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # BaseSettings defaults to extra='forbid', and unknown keys in a
+        # dotenv FILE are injected into validation — a stale key from an old
+        # .env would crash startup.  Filter dotenv keys to declared fields;
+        # unknown environment variables were already ignored by pydantic.
+        dotenv_filtering="only_existing",
     )
+
+    @model_validator(mode="after")
+    def _validate_csi_window(self) -> "Settings":
+        """Keep the CSI scan range sane and inside the smoke window."""
+        if self.detection_csi_min_seconds <= 0:
+            raise ValueError("detection_csi_min_seconds must be > 0")
+        if self.detection_csi_step_seconds <= 0:
+            raise ValueError("detection_csi_step_seconds must be > 0")
+        if self.detection_csi_max_seconds < self.detection_csi_min_seconds:
+            raise ValueError(
+                "detection_csi_max_seconds must be >= detection_csi_min_seconds"
+            )
+        if self.detection_csi_max_seconds > self.detection_smoke_seconds:
+            raise ValueError(
+                "detection_csi_max_seconds must not exceed "
+                "detection_smoke_seconds (the CSI window must end at or "
+                "before the smoke anchor)"
+            )
+        if not 0.0 <= self.detection_csi_only_min_prob <= 1.0:
+            raise ValueError(
+                "detection_csi_only_min_prob must be between 0 and 1"
+            )
+        if self.detection_csi_only_interval_s <= 0:
+            raise ValueError("detection_csi_only_interval_s must be > 0")
+        return self
 
 
 @lru_cache

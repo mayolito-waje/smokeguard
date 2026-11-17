@@ -4,16 +4,41 @@
  * WebSocket, stack in a toast list, and auto-dismiss after a short delay.
  */
 
-import type { WsAlert } from '../types';
+import type { DetectionLabel, WsAlert } from '../types';
 
 // ---------------------------------------------------------------------------
 // Toast state
 // ---------------------------------------------------------------------------
 
 export interface AlertToast {
-  key: number;          // unique key for the toast list (X-button dismiss)
-  id: number;           // detection event id in the SQLite store
-  detectedAt: number;   // epoch seconds
+  key: number;                 // unique key for the toast list (X-button dismiss)
+  id: number;                  // detection event id in the SQLite store
+  detectedAt: number;          // epoch seconds
+  label: DetectionLabel;       // 'csi_only' | 'smoke_only' | 'fusion'
+  pSensor: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Alarm sound (public/alert_sound.mp3)
+// ---------------------------------------------------------------------------
+
+const ALARM_SRC = '/alert_sound.mp3';
+let alarm: HTMLAudioElement | null = null;
+
+function playAlarm(): void {
+  try {
+    if (!alarm) {
+      alarm = new Audio(ALARM_SRC);
+      alarm.preload = 'auto';
+    }
+    alarm.currentTime = 0;
+    void alarm.play().catch(() => {
+      // Autoplay can be blocked before any user gesture — the toast is the
+      // primary notification, so silently ignore the audio failure.
+    });
+  } catch {
+    /* audio unsupported — ignore */
+  }
 }
 
 /** Toasts auto-dismiss after this many ms (X button is the primary dismiss). */
@@ -48,10 +73,13 @@ export function pushAlert(msg: WsAlert): void {
     key: nextKey++,
     id: msg.id,
     detectedAt: msg.detected_at,
+    label: msg.label ?? 'fusion',
+    pSensor: msg.p_sensor,
   };
   toasts.push(toast);
   if (toasts.length > MAX_TOASTS) toasts.shift();
   notify();
+  playAlarm();
 
   window.setTimeout(() => removeAlert(toast.key), AUTO_DISMISS_MS);
 }

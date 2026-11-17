@@ -1,22 +1,25 @@
-"""REST endpoints for smoking-activity detection (config, simulate, history)."""
+"""REST endpoints for smoking-activity detection (config, baseline, history)."""
 
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
+from app import inference
 from app.auth import get_current_user
-
+from app.detection import BaselineCaptureError
 from app.models import (
+    BaselineCaptureResponse,
     DetectionConfigResponse,
     DetectionConfigUpdate,
     DetectionEventDeleteResponse,
     DetectionEventDetail,
     DetectionEventSummary,
     DetectionEventsResponse,
+    DetectionLabel,
     ErrorResponse,
 )
+from app.report import build_monthly_report_pdf
 
 if TYPE_CHECKING:
     from app.detection import DetectionManager
@@ -43,56 +46,88 @@ def _get_store(request: Request) -> "DetectionStore":
 # Config (enable / disable)
 # ------------------------------------------------------------------
 
+def _config_response(request: Request) -> DetectionConfigResponse:
+    detection = _get_detection(request)
+    store = _get_store(request)
+    return DetectionConfigResponse(
+        enabled=store.get_enabled(),
+        csi_only_enabled=store.get_csi_only_enabled(),
+        baseline_status=detection.background_status(),
+        models_ready=inference.models_ready(),
+    )
+
+
 @router.get("/config", response_model=DetectionConfigResponse)
 async def get_detection_config(request: Request) -> DetectionConfigResponse:
     """Current enable/disable state (persisted in SQLite, default off)."""
-    return DetectionConfigResponse(enabled=_get_store(request).get_enabled())
+    return _config_response(request)
 
 
 @router.post(
     "/config",
     response_model=DetectionConfigResponse,
-    responses={400: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
+    responses={
+        400: {"model": ErrorResponse},
+        401: {"model": ErrorResponse},
+    },
 )
 async def set_detection_config(
     request: Request,
     body: DetectionConfigUpdate,
     _user: str = Depends(get_current_user),
 ) -> DetectionConfigResponse:
-    """Enable or disable the automatic detection mechanism (bearer required)."""
-    _get_store(request).set_enabled(body.enabled)
-    logger.info(
-        "Smoking detection %s (by %s)",
-        "enabled" if body.enabled else "disabled",
-        _user,
-    )
-    return DetectionConfigResponse(enabled=body.enabled)
+    """Update the detection toggles (bearer required; partial update)."""
+    if body.enabled is None and body.csi_only_enabled is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide 'enabled' and/or 'csi_only_enabled'",
+        )
+    store = _get_store(request)
+    if body.enabled is not None:
+        store.set_enabled(body.enabled)
+        logger.info(
+            "Smoking detection %s (by %s)",
+            "enabled" if body.enabled else "disabled",
+            _user,
+        )
+    if body.csi_only_enabled is not None:
+        store.set_csi_only_enabled(body.csi_only_enabled)
+        logger.info(
+            "Experimental CSI-only detection %s (by %s)",
+            "enabled" if body.csi_only_enabled else "disabled",
+            _user,
+        )
+    return _config_response(request)
 
 
 # ------------------------------------------------------------------
-# Simulate (manual trigger — works even while disabled)
+# Static background capture (CSI model baseline)
 # ------------------------------------------------------------------
 
 @router.post(
-    "/simulate",
-    response_model=DetectionEventSummary,
+    "/baseline",
+    response_model=BaselineCaptureResponse,
     responses={401: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-async def simulate_detection(
+async def capture_static_background(
     request: Request, _user: str = Depends(get_current_user)
-) -> DetectionEventSummary:
-    """Manually fire the detector once (bearer required; bypasses the toggle)."""
+) -> BaselineCaptureResponse:
+    """Capture the static CSI background from buffered packets (bearer required).
+
+    The capture must be made while the environment is quiet (no smoking /
+    movement); the stored (52,) vector is subtracted from every CSI model
+    window from then on.
+    """
     detection = _get_detection(request)
-    if not detection.has_buffered_csi:
-        raise HTTPException(
-            status_code=409,
-            detail="No CSI data buffered yet — start the data source and retry",
-        )
-    result = await detection.trigger()
-    if result is None:
-        raise HTTPException(status_code=409, detail="Detector did not fire")
-    logger.info("Detection simulated by %s (event #%s)", _user, result["id"])
-    return DetectionEventSummary(**result)
+    try:
+        info = await detection.capture_background()
+    except BaselineCaptureError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "Static background captured by %s (%d packets)",
+        _user, info["packet_count"],
+    )
+    return BaselineCaptureResponse(**info)
 
 
 # ------------------------------------------------------------------
@@ -104,14 +139,57 @@ async def list_detection_events(
     request: Request,
     year: int = Query(..., ge=1970, le=2100, description="Year, e.g. 2026"),
     month: int = Query(..., ge=1, le=12, description="Month 1-12"),
+    label: DetectionLabel | None = Query(
+        None,
+        description="Filter by detection class (omit for all)",
+    ),
 ) -> DetectionEventsResponse:
     """Detection events recorded in the given month, newest first."""
-    events = _get_store(request).list_events(year, month)
+    events = _get_store(request).list_events(year, month, label=label)
     return DetectionEventsResponse(
         year=year,
         month=month,
         count=len(events),
         events=[DetectionEventSummary(**e) for e in events],
+    )
+
+
+@router.get(
+    "/report",
+    responses={500: {"model": ErrorResponse}},
+)
+def download_monthly_report(
+    request: Request,
+    year: int = Query(..., ge=1970, le=2100, description="Year, e.g. 2026"),
+    month: int = Query(..., ge=1, le=12, description="Month 1-12"),
+) -> Response:
+    """Monthly detection PDF (all classes), read-only like the event listing."""
+    store = _get_store(request)
+    settings = request.app.state.settings  # type: ignore[attr-defined]
+    events = store.list_events_for_report(year, month)
+    try:
+        pdf_bytes = build_monthly_report_pdf(
+            year=year,
+            month=month,
+            events=events,
+            sensor_prob_threshold=settings.sensor_prob_threshold,
+            fusion_score_threshold=settings.fusion_score_threshold,
+            facility=settings.report_facility,
+            logo_path=settings.report_logo_path,
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate the monthly detection report")
+        raise HTTPException(
+            status_code=500, detail="Failed to generate report"
+        ) from exc
+    filename = f"smokeguard-detection-report-{year}-{month:02d}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

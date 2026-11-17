@@ -60,6 +60,8 @@ def create_app() -> FastAPI:
         description="Wi-Fi CSI smoke detection — data ingestion and streaming API",
         version="0.1.0",
     )
+    # Public settings handle for routes (report rendering, etc.).
+    app.state.settings = settings
 
     # ------------------------------------------------------------------
     # CORS — allow React dev server and production builds
@@ -100,9 +102,11 @@ def create_app() -> FastAPI:
         # Shared queue: MQTT network thread → async consumer
         queue: asyncio.Queue[CSIRecord] = asyncio.Queue(maxsize=2000)
 
-        # Smoke queue: PMS5003 readings at ~1 Hz (separate from the 100 Hz
-        # CSI queue so a CSI flood can never evict smoke samples)
-        smoke_queue: asyncio.Queue[SmokeRecord] = asyncio.Queue(maxsize=512)
+        # Smoke queue: PMS5003 readings at ~1-2 Hz (separate from the 100 Hz
+        # CSI queue so a CSI flood can never evict smoke samples).  Large
+        # enough that a backdated baseline burst (mockups / replays) cannot
+        # push the oldest samples out before the consumer drains them.
+        smoke_queue: asyncio.Queue[SmokeRecord] = asyncio.Queue(maxsize=2048)
 
         # MQTT reader (paho network thread, or CSV replay thread)
         loop = asyncio.get_running_loop()
@@ -141,7 +145,8 @@ def create_app() -> FastAPI:
                     )
                     await ws_manager.broadcast_sync(ws_msg.model_dump(by_alias=False))
 
-                # Feed the detection rolling buffer (last ~7 s of CSI)
+                # Feed the detection rolling buffer (covers the CSI window
+                # plus slack before the latest smoke anchor)
                 detection_manager.add_csi(record)
 
         consumer_task = asyncio.create_task(consume_queue())
@@ -181,13 +186,16 @@ def create_app() -> FastAPI:
                     )
                     await ws_manager.broadcast_sync(ws_msg.model_dump(exclude_none=True))
 
-                # Feed the detection rolling buffer (last ~17 s of smoke)
+                # Feed the detection rolling buffer (14 s window + 600 s
+                # causal baseline before the window start)
                 detection_manager.add_smoke(record)
 
         smoke_consumer_task = asyncio.create_task(consume_smoke_queue())
 
-        # Dummy detector trigger loop (fires only while enabled)
+        # Detection evaluation loop (every 0.2 s, only while enabled) and the
+        # off-loop model warmup (TensorFlow load must not block startup)
         detection_task = asyncio.create_task(detection_manager.run_trigger_loop())
+        model_warmup_task = asyncio.create_task(detection_manager.warmup_models())
 
         # Periodic status broadcast task
         async def broadcast_status() -> None:
@@ -231,6 +239,7 @@ def create_app() -> FastAPI:
         app.state._consumer_task = consumer_task
         app.state._smoke_consumer_task = smoke_consumer_task
         app.state._detection_task = detection_task
+        app.state._model_warmup_task = model_warmup_task
         app.state._status_task = status_task
         app.state._cleanup_task = cleanup_task
         app.state._queue = queue
@@ -248,7 +257,7 @@ def create_app() -> FastAPI:
             await smoke_queue.put(None)
 
         # Cancel tasks
-        for attr in ("_consumer_task", "_smoke_consumer_task", "_detection_task", "_status_task", "_cleanup_task"):
+        for attr in ("_consumer_task", "_smoke_consumer_task", "_detection_task", "_model_warmup_task", "_status_task", "_cleanup_task"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

@@ -281,12 +281,23 @@ class WSStatus(WSMessage):
     ntp_synced: bool | None = None
 
 
+# Alert classes, weakest first: csi_only (experimental) < smoke_only < fusion.
+DetectionLabel = Literal["csi_only", "smoke_only", "fusion"]
+
+
 class WSAlert(WSMessage):
     """Broadcast when a smoking activity is detected (toast trigger)."""
 
     type: Literal["alert"] = "alert"  # type: ignore[assignment]
     id: int = Field(description="Detection event id in the SQLite store")
     detected_at: float = Field(description="Detection UNIX epoch seconds")
+    label: DetectionLabel = Field(
+        description="fusion = CSI + sensor agree; smoke_only = sensor-only hit; "
+        "csi_only = CSI gesture without sensor confirmation (experimental)"
+    )
+    p_csi: float | None = None
+    p_sensor: float | None = None
+    fused_score: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +362,25 @@ class DetectionConfigResponse(BaseModel):
     """GET /api/detection/config response."""
 
     enabled: bool
+    csi_only_enabled: bool = False
+    baseline_status: dict | None = None
+    models_ready: bool = False
+
+
+class BaselineCaptureResponse(BaseModel):
+    """POST /api/detection/baseline response — captured static background."""
+
+    status: Literal["ok"] = "ok"
+    captured_at: float
+    packet_count: int
+    csi_seconds: float
 
 
 class DetectionConfigUpdate(BaseModel):
-    """POST /api/detection/config request body."""
+    """POST /api/detection/config request body (partial update)."""
 
-    enabled: bool
+    enabled: bool | None = None
+    csi_only_enabled: bool | None = None
 
 
 class DetectionEventSummary(BaseModel):
@@ -366,6 +390,12 @@ class DetectionEventSummary(BaseModel):
     detected_at: float
     csi_frames: int
     smoke_samples: int
+    label: DetectionLabel = "fusion"
+    p_csi: float | None = None
+    p_sensor: float | None = None
+    fused_score: float | None = None
+    csi_hit: bool | None = None
+    sensor_hit: bool | None = None
 
 
 class DetectionEventsResponse(BaseModel):
@@ -384,6 +414,12 @@ class DetectionEventDetail(BaseModel):
     detected_at: float
     csi_frames: int
     smoke_samples: int
+    label: DetectionLabel = "fusion"
+    p_csi: float | None = None
+    p_sensor: float | None = None
+    fused_score: float | None = None
+    csi_hit: bool | None = None
+    sensor_hit: bool | None = None
     csi: dict
     smoke: dict
 
