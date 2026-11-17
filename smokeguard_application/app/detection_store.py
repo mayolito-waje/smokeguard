@@ -26,9 +26,12 @@ CREATE TABLE IF NOT EXISTS detection_events (
     smoke_samples INTEGER NOT NULL,
     csi_json TEXT NOT NULL,             -- snapshot: frames + active_indices
     smoke_json TEXT NOT NULL,           -- snapshot: list of sample dicts
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    label TEXT NOT NULL DEFAULT 'fusion',  -- 'fusion' | 'smoke_only' | 'csi_only'
+    p_csi REAL,                         -- calibrated P(smoke) from the CSI model
+    p_sensor REAL,                      -- SVM P(smoke)
+    fused_score REAL                    -- 0.3*p_csi + 0.7*p_sensor; NULL for csi_only
 );
-CREATE INDEX IF NOT EXISTS idx_det_events_time ON detection_events(detected_at);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -36,7 +39,23 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+# Created after the migration so indexes on migrated columns never run
+# against a pre-migration table.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_det_events_time ON detection_events(detected_at);
+CREATE INDEX IF NOT EXISTS idx_det_events_label ON detection_events(label);
+"""
+
+# Columns added after the initial schema — migrated in place for old DBs.
+_MIGRATION_COLUMNS = {
+    "label": "TEXT NOT NULL DEFAULT 'fusion'",
+    "p_csi": "REAL",
+    "p_sensor": "REAL",
+    "fused_score": "REAL",
+}
+
 _DETECTION_ENABLED_KEY = "detection_enabled"
+_CSI_ONLY_ENABLED_KEY = "csi_only_enabled"
 
 
 class DetectionStore:
@@ -48,8 +67,23 @@ class DetectionStore:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+            self._conn.executescript(_INDEXES)
             self._conn.commit()
         logger.info("Detection store ready at %s", db_path)
+
+    def _migrate(self) -> None:
+        """Add label/probability columns to DBs created before they existed."""
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(detection_events)")
+        }
+        for column, decl in _MIGRATION_COLUMNS.items():
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE detection_events ADD COLUMN {column} {decl}"
+                )
+                logger.info("Migrated detection_events: added column %s", column)
 
     def close(self) -> None:
         """Close the connection (called on backend shutdown)."""
@@ -79,6 +113,43 @@ class DetectionStore:
             )
             self._conn.commit()
 
+    def get_csi_only_enabled(self) -> bool:
+        """Return whether the experimental CSI-only class is enabled."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (_CSI_ONLY_ENABLED_KEY,),
+            ).fetchone()
+        return row is not None and row[0] == "1"
+
+    def set_csi_only_enabled(self, enabled: bool) -> None:
+        """Persist the experimental CSI-only toggle (default off)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_CSI_ONLY_ENABLED_KEY, "1" if enabled else "0"),
+            )
+            self._conn.commit()
+
+    def get_setting(self, key: str) -> str | None:
+        """Read an arbitrary persisted setting (None when absent)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row is not None else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Upsert an arbitrary persisted setting."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            self._conn.commit()
+
     # ------------------------------------------------------------------
     # Detection events
     # ------------------------------------------------------------------
@@ -90,14 +161,22 @@ class DetectionStore:
         smoke_samples: int,
         csi_json: str,
         smoke_json: str,
+        label: str,
+        p_csi: float | None,
+        p_sensor: float | None,
+        fused_score: float | None,
     ) -> int:
         """Insert a detection event (csi_json/smoke_json pre-serialized)."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO detection_events "
-                "(detected_at, csi_frames, smoke_samples, csi_json, smoke_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (detected_at, csi_frames, smoke_samples, csi_json, smoke_json, datetime.now().timestamp()),
+                "(detected_at, csi_frames, smoke_samples, csi_json, smoke_json, "
+                "created_at, label, p_csi, p_sensor, fused_score) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    detected_at, csi_frames, smoke_samples, csi_json, smoke_json,
+                    datetime.now().timestamp(), label, p_csi, p_sensor, fused_score,
+                ),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -112,23 +191,34 @@ class DetectionStore:
             end = datetime(year, month + 1, 1).timestamp()
         return start, end
 
-    def list_events(self, year: int, month: int) -> list[dict]:
+    def list_events(
+        self, year: int, month: int, label: str | None = None
+    ) -> list[dict]:
         """Summaries (no JSON blobs) for one month, newest first."""
         start, end = self._month_bounds(year, month)
+        query = (
+            "SELECT id, detected_at, csi_frames, smoke_samples, "
+            "label, p_csi, p_sensor, fused_score "
+            "FROM detection_events "
+            "WHERE detected_at >= ? AND detected_at < ?"
+        )
+        params: list = [start, end]
+        if label is not None:
+            query += " AND label = ?"
+            params.append(label)
+        query += " ORDER BY detected_at DESC"
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, detected_at, csi_frames, smoke_samples "
-                "FROM detection_events "
-                "WHERE detected_at >= ? AND detected_at < ? "
-                "ORDER BY detected_at DESC",
-                (start, end),
-            ).fetchall()
+            rows = self._conn.execute(query, params).fetchall()
         return [
             {
                 "id": row[0],
                 "detected_at": row[1],
                 "csi_frames": row[2],
                 "smoke_samples": row[3],
+                "label": row[4],
+                "p_csi": row[5],
+                "p_sensor": row[6],
+                "fused_score": row[7],
             }
             for row in rows
         ]
@@ -137,7 +227,8 @@ class DetectionStore:
         """Full event including parsed snapshot JSON, or None if missing."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, detected_at, csi_frames, smoke_samples, csi_json, smoke_json "
+                "SELECT id, detected_at, csi_frames, smoke_samples, csi_json, "
+                "smoke_json, label, p_csi, p_sensor, fused_score "
                 "FROM detection_events WHERE id = ?",
                 (event_id,),
             ).fetchone()
@@ -150,6 +241,10 @@ class DetectionStore:
             "smoke_samples": row[3],
             "csi": json.loads(row[4]),
             "smoke": json.loads(row[5]),
+            "label": row[6],
+            "p_csi": row[7],
+            "p_sensor": row[8],
+            "fused_score": row[9],
         }
 
     def delete_event(self, event_id: int) -> bool:

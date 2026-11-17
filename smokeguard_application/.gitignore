@@ -8,6 +8,7 @@ dist/
 # InfluxDB local data (large, binary)
 influxdb_data/
 influxdb_bin/
+raw_sensor_data/
 
 # Environment secrets
 .env

@@ -130,23 +130,29 @@ Server → client at `GET /ws`:
  "gas_kohm": 120.4, "altitude_m": 45.2, "rssi": -52}
 {"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
  "receiver_online": true, "ntp_synced": true, ...}
-{"type": "alert", "id": 42, "detected_at": 1790756577.8}
+{"type": "alert", "id": 42, "detected_at": 1790756577.8,
+ "label": "fusion", "p_csi": 0.87, "p_sensor": 0.95, "fused_score": 0.93}
 {"type": "pong"}
 ```
 
 The `metadata` field is always present (including `subcarrier_wrap_idx` for signed-subcarrier mapping). For LLTF / unknown subcarrier counts, metadata is computed dynamically — it is never `null` for valid data.
 
-Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`. The `alert` message fires when a smoking activity is detected (toast trigger).
+Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`. The `alert` message fires when a smoking activity is detected (toast trigger); `label` distinguishes `fusion` (CSI + sensor agree), `smoke_only` (sensor-only "possible" activity) and the experimental `csi_only` (CSI gesture with the sensor below its gate; weakest class).
 
-### Smoking-activity detection (`app/detection.py`, `app/detection_store.py`, `app/routes/detection.py`)
+### Smoking-activity detection (`app/inference.py`, `app/detection.py`, `app/detection_store.py`, `app/routes/detection.py`)
 
-The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets → ResNet-LSTM, weighted box fusion) does not exist yet — everything around it does:
+The real recognition pipeline is wired in: sensor SVM + CSI ResNet-LSTM + gated late fusion, evaluated every 0.2 s while enabled.
 
-- **`DetectionManager`** keeps rolling in-memory buffers of recent `CSIRecord`s (~7 s) and `SmokeRecord`s (~17 s), fed from the two consumer tasks in `main.py`. Pruning is relative to the **latest record's timestamp** (not `time.time()`) so CSV replay works — replayed rows carry original capture timestamps.
-- **Dummy trigger**: `run_trigger_loop()` fires at random intervals (`dummy_trigger_min_s`/`dummy_trigger_max_s`, default 30–120 s) **only when enabled** (SQLite-persisted flag, default off). At most one trigger can be in flight when the toggle flips off. `POST /api/detection/simulate` fires one manually and bypasses the toggle.
-- **The seam**: `DetectionManager.detect(csi, smoke) -> bool` currently returns `bool(csi)` — this is the ONLY method the real models will replace. It receives exactly the 7 s/17 s windows the SVM + ResNet-LSTM will consume.
-- **Snapshot on trigger**: CSI is stored as per-frame `{t, amp}` for the **active subcarriers only** (amplitude = `sqrt(i²+q²)`, rounded to 2 dp; the viz pipeline consumes amplitude only), smoke as full sample dicts. Both windows are persisted as JSON in SQLite (`detection.db`, table `detection_events`) alongside the detection timestamp — deliberately independent of InfluxDB, whose 7-day CSI cleanup would erase old events. The active set follows the ESP-IDF FFT-bin mapping (for 64 subcarriers: indices 1–26 → sc +1…+26, 38–63 → sc −26…−1); pre-fix events (no `snapshot_version`) carry the old index set and are not migrated.
-- **Frontend**: `alert` WS messages → `alertStore` → `ToastStack` (top-right, newest stacks below, × close + 8 s auto-dismiss). The Live sidebar has a `DetectionToggle` card (enable/disable + simulate). Header tabs switch to the History view (month/year picker → event list) and the Detail view, which preprocesses the CSI window with the notebook pipeline ported to TypeScript (`frontend/src/dsp/preprocess.ts` — Hampel row-wise → Butterworth 20 Hz filtfilt → Gaussian σ=2, verified against scipy ≤ 1e-5 via `scripts/gen_dsp_fixture.py`) and renders 3 random subcarriers (original dotted vs preprocessed solid, normalized time) plus the gas-resistance chart (reuses `drawVocChart`) and average tiles for the other smoke metrics. Reshuffling (and the initial pick) only considers subcarriers whose traces carry signal, so the DC null / guard bands — which pre-fix events stored in `active_indices` — are never picked. A bin button in the detail toolbar deletes the event (`DELETE /api/detection/events/{id}`, confirm first) and returns to History.
+- **Models** (`models/`): `csi_resnet_lstm_7class.keras` (Keras 3 / TF 2.21, input `(None, 420, 52)` — any window duration is resampled to 420 points × 52 active subcarriers, **7-class softmax** `['smoke','eat','drink','sit','stand','random','static']`, 216,615 params, LSTM 96 units) with the matching `csi_resnet_lstm_7class.platt.json` calibrator (schema 2: multiclass one-vs-rest Platt + a dedicated binary smoke pair; class list and shapes are validated at load time) and `smoke_svm_pipeline.joblib` (sklearn `StandardScaler → SVC(rbf, C≈0.75, gamma='scale', balanced, probability=True)`, classes `[no-smoke, smoke]`). Loaded lazily in a warmup task (`DetectionManager.warmup_models`) so startup is never blocked; TF imports stay inside `load_models()` so the sensor-only path works without TensorFlow. If the checkpoint or calibrator is missing/mismatched, the CSI path is disabled and detection degrades to sensor-only (`smoke_only`).
+- **`app/inference.py`** ports the notebooks verbatim: amplitude over active subcarriers `1–26 ∪ 38–63` → Hampel (7, 3σ, MAD) → linear resample to exactly 420 points → Butterworth order-4 5 Hz filtfilt (fs = 419/duration) → Gaussian σ=2 → subtract the static background (52,) → logits `dense_features @ kernel + bias` → Platt calibration from `csi_resnet_lstm_7class.platt.json` (multiclass one-vs-rest `sigmoid(A_k·z_k + B_k)` then renormalize; binary smoke `sigmoid(A·z_smoke + B)` with no renormalization). The CSI hit gate is the calibrated argmax over all seven classes (`smoke`; `static` is the idle/background class and never a hit). Sensor path: 14.905 s window + causal 600 s baseline → 22 features (per channel `mean−median`, `std`, `last−first`; plus gas ratio) → SVM `predict_proba[:,1]`.
+- **Timing protocol**: at each tick the anchor is the latest smoke sample; smoke window = `[anchor − 14.905 s, anchor]`, sensor baseline = the 600 s before the window start. The CSI window starts at the same instant and its duration is **scanned over 4.0–7.0 s in 0.5 s steps** (smoking gestures vary); each candidate is resampled to 420 points over its own duration and the winner is chosen by `select_best_csi_candidate` (lexicographic max of `(hit, p_smoke)`, ties keep the shortest). Evaluation requires the buffer to cover the full smoke window. The CSI model runs **only after the sensor gate passes** — without a sensor hit neither label can fire, so idle ticks do no CSI work.
+- **Window length in events**: the chosen duration is stored as `csi.window_seconds` inside the event JSON and shown in the Detail view (older events fall back to the frame-timestamp span).
+- **Fusion + labels**: `score = 0.50·p_csi + 0.50·p_sensor` (balanced; the notebook's 0.3/0.7 sensor-heavy weighting let weak CSI hits become fusion events); `fusion` = CSI argmax gate (`smoke`) AND sensor gate (≥ 0.4050) AND score ≥ 0.70; `smoke_only` = sensor gate only ("possible smoking activity — not backed by CSI", a product-mandated extension of the notebook's AND-only policy). **Experimental `csi_only`** (off by default): the sensor operates but stays below its gate while the CSI model classifies the gesture as `smoke` — the weakest class, `fused_score` is NULL (no fusion happened). It requires a working sensor reading (`p_sensor is not None`; "unavailable" never produces it), the CSI model and a captured static background, and is rate-limited by `detection_csi_only_interval_s` (default 1 s) because the duration scan is expensive. Without a static background the CSI path is skipped, so events degrade to `smoke_only`.
+- **`DetectionManager`** keeps rolling in-memory buffers (CSI 4096 packets / smoke 2048 samples; prune windows 17.9 s and 737.9 s relative to the latest record timestamp, so replay works) fed from the consumer tasks in `main.py`. `run_trigger_loop()` evaluates every `detection_interval_s` (0.2 s) **only when enabled** (SQLite-persisted, default off). Alert dedupe is a `detection_cooldown_s` (30 s) suppression in record-timestamp domain; during a cooldown only a strictly higher-ranked class may escalate (`csi_only` 0 < `smoke_only` 1 < `fusion` 2). When a `fusion` confirmation escalates over a `smoke_only` alert inside its cooldown, the superseded `smoke_only` event is deleted from the history database so one episode leaves one history entry.
+- **Static background**: `POST /api/detection/baseline` (bearer) preprocesses the most recent ~420 buffered CSI packets with the notebook chain and stores their time-mean `(52,)` vector in the `settings` table (survives restarts). Capture it while the room is quiet.
+- **Snapshot on trigger**: the exact windows that produced the decision are stored — CSI as per-frame `{t, amp}` for the **active subcarriers only** (amplitude = `sqrt(i²+q²)`, rounded to 2 dp), smoke as full sample dicts, plus `label`, `p_csi`, `p_sensor`, `fused_score`. Persisted as JSON in SQLite (`detection.db`, table `detection_events`) — deliberately independent of InfluxDB, whose 7-day CSI cleanup would erase old events. The active set follows the ESP-IDF FFT-bin mapping; pre-fix events (no `snapshot_version`) carry the old index set and are not migrated.
+- **Frontend**: `alert` WS messages → `alertStore` → `ToastStack` (top-right, newest stacks below, × close + 8 s auto-dismiss, `public/alert_sound.mp3` plays on push, including the experimental class). Toast title/copy and styling differ per label ("Smoking activity detected" / "Possible smoking activity (not backed by CSI)" amber / "Possible smoking activity (not backed by air-quality data)" dashed muted). The Live sidebar has a `DetectionToggle` card (enable/disable, **CSI-only detection (experimental)** checkbox, **Capture static background**, baseline/models status). History has a class filter (All / CSI + smoke sensor / Sensor only / CSI only) and per-event label badges + probabilities. The Detail view preprocesses the CSI window with the notebook pipeline ported to TypeScript (`frontend/src/dsp/preprocess.ts` — Hampel row-wise → Butterworth 20 Hz filtfilt → Gaussian σ=2, verified against scipy ≤ 1e-5 via `scripts/gen_dsp_fixture.py`). It uses a two-column layout — both graphs (preprocessed CSI, VOC gas resistance) on the left, air-quality window averages on the right — and plots subcarriers **1–5 by default**, with a **Select subcarriers** checklist toggling any of the 52 active subcarriers (All / Clear / 1–5 shortcuts; traces are coloured by selection order so adjacent picks stay distinguishable). A bin button in the detail toolbar deletes the event (`DELETE /api/detection/events/{id}`, confirm first).
+- **Testing without hardware**: `scripts/verify_inference.py` runs the offline inference path on recorded parquet + BORIS labels (CSI window/static background, sensor window/baseline, synthetic profile); `scripts/mockup_detection_event.py` publishes mock events over MQTT (`--mode fusion|smoke-only|csi-only|static`, real CSI replay with shifted timestamps, backdated sensor baseline). `csi-only` publishes a clean baseline plus a CSI gesture burst and no smoking samples. Unit tests: `uv run pytest tests/`.
 
 ### Admin auth (PoC) (`app/auth.py`, `app/auth_store.py`, `app/routes/auth.py`)
 
@@ -160,8 +166,8 @@ The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets �
     -d '{"username":"admin","new_password":"password123","secret":"<PASSWORD_RESET_SECRET>"}'
   ```
 
-- Scope: the UI is gated (frontend `AuthGate` hides the dashboard) and every mutating/destructive route requires a valid bearer token (`Depends(get_current_user)`) — `POST /api/detection/config`, `POST /api/detection/simulate`, `DELETE /api/detection/events/{id}`, `GET /api/cleanup`. Read-only routes and `/ws` stay open. JWTs are stateless: logout and password resets do not revoke issued tokens; they expire on their own.
-- Config gotcha: `Settings` (pydantic-settings) uses `extra='forbid'` — **any new `.env` key must be declared as a field in `app/config.py`** or the backend fails to import (`ValidationError: Extra inputs are not permitted`).
+- Scope: the UI is gated (frontend `AuthGate` hides the dashboard) and every mutating/destructive route requires a valid bearer token (`Depends(get_current_user)`) — `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`, `GET /api/cleanup`. Read-only routes and `/ws` stay open. JWTs are stateless: logout and password resets do not revoke issued tokens; they expire on their own.
+- Config gotcha: `BaseSettings` keeps pydantic-settings' default `extra='forbid'`, and unknown keys in a dotenv **file** are injected into validation — a stale key would crash startup. `Settings` therefore sets `dotenv_filtering="only_existing"` (pydantic-settings ≥ 2.14), so old/removed `.env` keys are harmless; unknown **environment** variables were always ignored. New settings must still be declared as fields in `app/config.py` to take effect (env var names are the upper-cased field names). The two auth secrets are the only required fields.
 
 ### REST API (`app/routes/api.py`, `app/routes/detection.py`)
 
@@ -172,16 +178,16 @@ The real recognition pipeline (17 s smoke/VOC → SVM, 7 s CSI ≈ 700 packets �
 | `GET /api/readings/latest?limit=N` | N most recent readings (default 10, max 500) |
 | `GET /api/readings?start=<ISO>&stop=<ISO>&limit=N` | Time-range query (start required, max 10000) |
 | `GET /api/cleanup` | Manually trigger retention cleanup (deletes readings older than `csi_retention_days`, default 7) |
-| `GET /api/detection/config` | `{enabled}` — current detection toggle state |
-| `POST /api/detection/config` | Body `{enabled}` — persist the toggle (survives restarts) |
-| `POST /api/detection/simulate` | Fire the detector once manually (bypasses the toggle; 409 if no CSI buffered) |
-| `GET /api/detection/events?year=&month=` | Detection events for a month, newest first (summaries, no JSON blobs) |
+| `GET /api/detection/config` | `{enabled, csi_only_enabled, baseline_status, models_ready}` — toggles + static-background state |
+| `POST /api/detection/config` | Body `{enabled?, csi_only_enabled?}` — partial update of the persisted toggles (400 if neither is provided) |
+| `POST /api/detection/baseline` | Capture the CSI static background from buffered packets (409 with fewer than `detection_baseline_min_packets`) |
+| `GET /api/detection/events?year=&month=&label=` | Detection events for a month, newest first; optional `label=fusion|smoke_only|csi_only` filter (422 on other values) |
 | `GET /api/detection/events/{id}` | Full event incl. CSI/smoke snapshots (404 if missing) |
 | `DELETE /api/detection/events/{id}` | Delete one event from SQLite (404 if missing; irreversible) |
 | `POST /api/auth/login` | Body `{username, password}` → `{token, expires_at}`; 401 on bad credentials |
 | `POST /api/auth/reset-password` | Body `{username, new_password, secret}`; requires a valid bearer token (401), 403 on bad secret, 404 unknown user |
 
-**Bearer-token required** (`Authorization: Bearer <JWT>`): `GET /api/cleanup`, `POST /api/detection/config`, `POST /api/detection/simulate`, `DELETE /api/detection/events/{id}`. All other routes are open.
+**Bearer-token required** (`Authorization: Bearer <JWT>`): `GET /api/cleanup`, `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`. All other routes are open.
 
 ## ESP-IDF Build System (sibling components)
 
@@ -340,6 +346,17 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | InfluxDB write batch | 500 points / 1000ms | `WriteOptions` in `influxdb_client.py` |
 | Async queue size | 2000 | `main.py` consumer |
 | WS per-client queue | 256 | `ws_queue_maxsize` in Settings |
+| CSI checkpoint | `models/csi_resnet_lstm_7class.keras` (7-class, LSTM 96) | `csi_model_path` in Settings |
+| CSI calibrator | `models/csi_resnet_lstm_7class.platt.json` (schema 2) | `csi_platt_path` in Settings |
+| Detection interval | 0.2 s | `detection_interval_s` in Settings |
+| Alert cooldown | 30 s | `detection_cooldown_s` in Settings |
+| CSI scan window | 4.0–7.0 s, 0.5 s step | `detection_csi_min/max/step_seconds` |
+| Smoke window | 14.905367895113585 s | `detection_smoke_seconds` |
+| Sensor baseline | 600 s causal | `detection_sensor_baseline_seconds` |
+| Sensor gate / fused threshold | 0.4049989698494056 / 0.70 | `sensor_prob_threshold` / `fusion_score_threshold` |
+| Fusion weights | 0.50 CSI / 0.50 sensor | `fusion_csi_weight` |
+| CSI-only scan cap | 1.0 s | `detection_csi_only_interval_s` |
+| CSI-only extra gate | 0.0 (argmax only) | `detection_csi_only_min_prob` |
 | Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `mqtt_reader.py` |
 | JWT lifetime | 7 days | `jwt_expire_days` in Settings (`JWT_EXPIRE_DAYS`) |
 | Auth secrets | separate signing + reset secrets | `JWT_SECRET` / `PASSWORD_RESET_SECRET` in `.env` (generate: `scripts/setup_auth_secrets.sh`) |

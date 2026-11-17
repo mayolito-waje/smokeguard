@@ -172,24 +172,3 @@ export function preprocessMatrix(amp: number[][]): number[][] {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Subcarrier picking
-// ---------------------------------------------------------------------------
-
-/** Pick `count` distinct random entries from `candidates` (sorted output). */
-export function pickRandomSubcarriers(
-  candidates: readonly number[],
-  count = 3,
-  rng: () => number = Math.random,
-): number[] {
-  const idx = candidates.slice();
-  const n = idx.length;
-  const c = Math.min(count, n);
-  for (let i = 0; i < c; i++) {
-    const j = i + Math.floor(rng() * (n - i));
-    const tmp = idx[i];
-    idx[i] = idx[j];
-    idx[j] = tmp;
-  }
-  return idx.slice(0, c).sort((a, b) => a - b);
-}

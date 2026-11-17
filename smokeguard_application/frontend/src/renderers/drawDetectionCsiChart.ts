@@ -1,9 +1,12 @@
 /**
  * Detection-detail CSI renderer — notebook-style visualization
- * (CSI_RESEARCH.ipynb cell 20): for the 3 picked subcarriers, plot the
+ * (CSI_RESEARCH.ipynb cell 20): for the selected subcarriers, plot the
  * ORIGINAL amplitude (dotted, alpha 0.4) against the fully PREPROCESSED
  * amplitude (solid, lw 2) over NORMALIZED time (0 … 1), matching the
  * matplotlib figure (':', alpha=0.4 vs '-', linewidth=2).
+ *
+ * Colors are assigned by position in the SELECTED set (not by absolute
+ * subcarrier), so adjacent picks such as 1–5 stay distinguishable.
  */
 
 import { PALETTE, lineColor, type Theme } from './drawStripChart';
@@ -89,6 +92,10 @@ export function drawDetectionCsiChart(
   // ---- X axis = normalized time (matches the notebook) ----
   const xPx = (fi: number) => pL + (fi / Math.max(1, nBuf - 1)) * pW;
 
+  // Spectrum spread across the selection, not the absolute subcarrier index.
+  const colorFor = (pi: number) =>
+    lineColor(pi, 0, Math.max(1, picks.length - 1));
+
   // ---- Y scale over all plotted data (original + preprocessed) ----
   let rawMax = 0;
   for (const pick of picks) {
@@ -144,7 +151,7 @@ export function drawDetectionCsiChart(
 
   ctx.lineJoin = 'round';
   picks.forEach((pick, pi) => {
-    const color = lineColor(pick.subIdx, 0, Math.max(1, frames[0].amp.length - 1));
+    const color = colorFor(pi);
 
     // original (notebook: ':', alpha=0.4)
     ctx.globalAlpha = 0.4;
@@ -177,21 +184,53 @@ export function drawDetectionCsiChart(
   });
   ctx.globalAlpha = 1;
 
-  // ---- legend (top-left): color swatch per pick + style key ----
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  let ly = pT + 6;
-  for (const pick of picks) {
-    const color = lineColor(pick.subIdx, 0, Math.max(1, frames[0].amp.length - 1));
-    ctx.fillStyle = color;
-    ctx.fillRect(pL + 8, ly + 2, 12, 3);
+  // ---- legend (top-left, wrapped into columns): one swatch per pick ----
+  if (picks.length === 0) {
     ctx.fillStyle = C.inkMuted;
-    ctx.fillText(`Subcarrier ${pick.label}`, pL + 26, ly);
-    ly += 15;
+    ctx.font = '13px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('No subcarriers selected', (pL + pR) / 2, (pT + pB) / 2);
+  } else {
+    const rowH = 14;
+    const colW = 150;
+    const availH = Math.max(rowH, pB - pT - 26);
+    const rowsPerCol = Math.max(1, Math.floor(availH / rowH));
+    const maxCols = Math.max(1, Math.floor((pW - 16) / colW));
+    const capacity = rowsPerCol * maxCols;
+    const overflow = picks.length > capacity;
+    const shown = overflow ? picks.slice(0, capacity - 1) : picks;
+
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    shown.forEach((pick, i) => {
+      const col = Math.floor(i / rowsPerCol);
+      const row = i % rowsPerCol;
+      const x = pL + 8 + col * colW;
+      const y = pT + 6 + row * rowH;
+      ctx.fillStyle = colorFor(i);
+      ctx.fillRect(x, y + 2, 12, 3);
+      ctx.fillStyle = C.inkMuted;
+      ctx.fillText(`Subcarrier ${pick.label}`, x + 18, y);
+    });
+    if (overflow) {
+      const i = shown.length;
+      const col = Math.floor(i / rowsPerCol);
+      const row = i % rowsPerCol;
+      const x = pL + 8 + col * colW;
+      const y = pT + 6 + row * rowH;
+      ctx.fillStyle = C.inkMuted;
+      ctx.fillText(`+${picks.length - shown.length} more`, x + 18, y);
+    }
   }
+
+  // ---- style key (top-right, under the frame counter) ----
   ctx.fillStyle = C.inkMuted;
-  ctx.fillText('solid = preprocessed CSI · dotted = original CSI', pL + 8, ly);
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText('solid = preprocessed · dotted = original', pR - 4, pT + 16);
 
   // ---- X-axis normalized-time labels ----
   ctx.fillStyle = C.inkMuted;

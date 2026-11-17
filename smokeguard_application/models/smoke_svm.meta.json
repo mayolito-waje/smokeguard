@@ -1,0 +1,157 @@
+{
+  "classes": [
+    "no-smoke",
+    "smoke"
+  ],
+  "dataset": {
+    "n_features": 22,
+    "n_test": 108,
+    "n_train": 598,
+    "test_intervals_sha256": "1d7ef04ea59d9324a37ad7848b8306f1ee467c82a9747d6faecf3d55cb734e15",
+    "test_labels_sha256": "941f965e36662acb3551869eb10331bf6c3ca79c5259e55eafbf2ba99024d86c",
+    "train_intervals_sha256": "83ba11411a03f9cb27c3641fa7c3410fbf52c555dd0296fc5055d2fa64e53008",
+    "train_labels_sha256": "14ac084f446cd89fd2a354adef268be4ef85df2d2c62c2ae62242fdb70effae3",
+    "x_test_sha256": "350976d2771043fb570823f64cfd39bc06436c6a20294ab7d58d7df4592d8b6b",
+    "x_train_sha256": "f2e1646435fcc21e5ff08b939a16aa2ba2f48fb924ca1d1a622cca57ad5a32c7"
+  },
+  "evaluation": {
+    "fn": 0,
+    "fp": 2,
+    "n_test": 108,
+    "n_train": 598,
+    "name": "file holdout (TEST_DATA.csv)",
+    "test_accuracy": 0.9814814814814815,
+    "test_ap": 1.0,
+    "test_balanced_accuracy": 0.9863013698630136,
+    "test_brier": 0.00430142757642526,
+    "test_f1": 0.9722222222222222,
+    "test_precision": 0.9459459459459459,
+    "test_recall": 1.0,
+    "test_roc_auc": 1.0,
+    "threshold": 0.4049989698494056,
+    "tn": 71,
+    "tp": 35,
+    "train_oof_f1_at_threshold": 0.9688149688149689,
+    "train_oof_precision": 0.9471544715447154,
+    "train_oof_recall": 0.9914893617021276
+  },
+  "feature_config": {
+    "baseline_stats": [
+      "base_diff",
+      "base_ratio"
+    ],
+    "channels": [
+      "temp_c",
+      "humidity_pct",
+      "pressure_hpa",
+      "gas_kohm",
+      "pm1_0",
+      "pm2_5",
+      "pm10"
+    ],
+    "dropped_columns": {},
+    "feature_names": [
+      "temp_c__base_diff",
+      "temp_c__std",
+      "temp_c__first_last_diff",
+      "humidity_pct__base_diff",
+      "humidity_pct__std",
+      "humidity_pct__first_last_diff",
+      "pressure_hpa__base_diff",
+      "pressure_hpa__std",
+      "pressure_hpa__first_last_diff",
+      "gas_kohm__base_diff",
+      "gas_kohm__std",
+      "gas_kohm__first_last_diff",
+      "pm1_0__base_diff",
+      "pm1_0__std",
+      "pm1_0__first_last_diff",
+      "pm2_5__base_diff",
+      "pm2_5__std",
+      "pm2_5__first_last_diff",
+      "pm10__base_diff",
+      "pm10__std",
+      "pm10__first_last_diff",
+      "gas_kohm__base_ratio"
+    ],
+    "include_duration": false,
+    "scaler": "standardscaler",
+    "window_stats": [
+      "std",
+      "first_last_diff"
+    ]
+  },
+  "force_retrain": false,
+  "frozen_split_sha256": "17bdad2a9da677da3ee05fe802b7fdb60bfc26a27c78f5f70939a2624f95bb81",
+  "grid": {
+    "best_cv_f1": 0.9612734316600541,
+    "best_params": {
+      "C": 0.7498942093324559,
+      "gamma": "scale"
+    },
+    "cv_folds": 5,
+    "cv_mean_f1": 0.9612734316600541,
+    "cv_std_f1": 0.026652608068599842,
+    "cv_strategy": "StratifiedGroupKFold",
+    "n_candidates": 36,
+    "n_groups": 5,
+    "scoring": "f1"
+  },
+  "model_path": "/content/drive/MyDrive/CSI_TRAINING/models/smoke_sensor_svm_v2/smoke_svm_pipeline.joblib",
+  "platt": {
+    "A": -4.365311126979251,
+    "B": -1.0314958327157944,
+    "method": "sklearn_internal_stratified_5fold_cv",
+    "note": "A and B are fitted inside the training split. There is no validation split; the standalone threshold is tuned on grouped out-of-fold training predictions."
+  },
+  "preprocessing": {
+    "baseline_channel": "gas_kohm",
+    "baseline_seconds": 600.0,
+    "min_baseline_samples": 30,
+    "min_samples_per_interval": 8,
+    "window_seconds": 14.905367895113585,
+    "window_source": "mean_training_interval_duration"
+  },
+  "run_id": "20261108T133648288119Z",
+  "schema_version": 2,
+  "selection_metric": "group_cv_f1",
+  "split_meta": {
+    "initial_split_sha256": "17bdad2a9da677da3ee05fe802b7fdb60bfc26a27c78f5f70939a2624f95bb81",
+    "kind": "file_holdout",
+    "revision": 0,
+    "test_files": [
+      "TEST_DATA.csv"
+    ],
+    "train_files": [
+      "smoke_sensor_observation_10-27-2026.csv",
+      "smoke_sensor_observation_11-04-2026.csv",
+      "smoke_sensor_observation_11-05-2026.csv",
+      "smoke_sensor_observation_11-08-2026_1.csv",
+      "smoke_sensor_observation_11-08-2026_2.csv"
+    ],
+    "window_seconds": 14.905367895113585
+  },
+  "svm_params": {
+    "C": 0.7498942093324559,
+    "class_weight": "balanced",
+    "gamma": "scale",
+    "kernel": "rbf",
+    "probability": true,
+    "random_state": 42
+  },
+  "tag": "smoke_svm_rbf_file",
+  "threshold": {
+    "objective": "f1",
+    "train_oof_f1_at_threshold": 0.9688149688149689,
+    "tuned_on": "train_oof_group_cv",
+    "value": 0.4049989698494056
+  },
+  "trained_at_utc": "2026-11-08T13:37:00Z",
+  "training_fingerprint": "ef4cf62ea1314126b40fc0e0ef33bada4b256c09493ed9555e896f05f890c4fd",
+  "versions": {
+    "joblib": "1.6.0",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "sklearn": "1.6.1"
+  }
+}
