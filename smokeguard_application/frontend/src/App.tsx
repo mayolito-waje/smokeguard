@@ -179,6 +179,9 @@ export default function App({ onLogout }: AppProps) {
             </div>
           </div>
 
+          {/* Smoking detection toggle */}
+          <DetectionToggle />
+
           {/* Trivia */}
           <div className="card card-trivia">
             <div className="card-header">
@@ -187,9 +190,6 @@ export default function App({ onLogout }: AppProps) {
             </div>
             <p className="trivia-text" key={factIdx}>{currentFact}</p>
           </div>
-
-          {/* Smoking detection toggle */}
-          <DetectionToggle />
         </aside>
 
         {/* ---- Main chart + bottom sensor panels ---- */}
