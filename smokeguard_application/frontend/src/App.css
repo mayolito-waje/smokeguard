@@ -193,6 +193,46 @@ body,
   background: rgba(220, 38, 38, 0.12);
 }
 
+/* ---- Internet/NTP badge + refresh ---- */
+.ntp-badge {
+  cursor: help;
+}
+
+.btn-ntp-refresh {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.btn-ntp-refresh:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.btn-ntp-refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ntp-spin {
+  display: inline-block;
+  animation: ntp-spin 1s linear infinite;
+}
+
+@keyframes ntp-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ===================================================================
    Body (sidebar + main)
    =================================================================== */

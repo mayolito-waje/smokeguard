@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     mqtt_topic_smoke: str = "home/smoke_sensor/data"
     mqtt_client_id: str = "smokeguard-backend"
 
+    # Application-level internet probe (NTP, UI status only).  The ESP32s use
+    # their own SNTP clients; this probe tells the dashboard whether *this
+    # machine* can reach the internet and never feeds the record timestamps.
+    ntp_servers: str = "pool.ntp.org,time.google.com,time.cloudflare.com"
+    ntp_timeout_s: float = 1.0
+    ntp_recheck_interval_s: float = 300.0  # 0 = startup + manual refresh only
+    # A live record timestamp is trusted only when it is within this many
+    # seconds of the host clock (plus the 2020 sanity floor).  Before its
+    # first NTP sync the ESP32 stamps seconds-since-boot — a positive
+    # 1970-epoch value — which this window catches and replaces.
+    timestamp_max_skew_s: float = 300.0  # ±5 minutes
+
     # CSV replay mode (development without hardware): set to a .csv path to
     # replay recorded CSI data instead of subscribing to MQTT
     replay_csv: str = ""
@@ -117,6 +129,11 @@ class Settings(BaseSettings):
         dotenv_filtering="only_existing",
     )
 
+    @property
+    def ntp_server_list(self) -> list[str]:
+        """Configured NTP servers, trimmed and without empty entries."""
+        return [s.strip() for s in self.ntp_servers.split(",") if s.strip()]
+
     @model_validator(mode="after")
     def _validate_csi_window(self) -> "Settings":
         """Keep the CSI scan range sane and inside the smoke window."""
@@ -140,6 +157,12 @@ class Settings(BaseSettings):
             )
         if self.detection_csi_only_interval_s <= 0:
             raise ValueError("detection_csi_only_interval_s must be > 0")
+        if self.ntp_timeout_s <= 0:
+            raise ValueError("ntp_timeout_s must be > 0")
+        if self.ntp_recheck_interval_s < 0:
+            raise ValueError("ntp_recheck_interval_s must be >= 0")
+        if self.timestamp_max_skew_s <= 0:
+            raise ValueError("timestamp_max_skew_s must be > 0")
         return self
 
 

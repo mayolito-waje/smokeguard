@@ -85,13 +85,13 @@ Smoke CSV format (no header) — `_process_smoke_line()` parses it into a `Smoke
 - **16 fields** (current firmware): `timestamp,pm1_0,pm2_5,pm10,cnt0_3,cnt0_5,cnt1_0,cnt2_5,cnt5_0,cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,altitude_m,rssi` — the BME680 block (cols 10–14) is parsed as floats.
 - **11 fields** (legacy firmware, still accepted): the same without the BME680 block — those fields stay `None` and are omitted from WS JSON (`exclude_none=True`) and InfluxDB.
 
-`timestamp` is UNIX epoch seconds; 0/negative (NTP unsynced) falls back to server receive time, mirroring the CSI fallback. Malformed lines bump `dropped_lines`.
+`timestamp` is UNIX epoch seconds; 0/negative, or more than `timestamp_max_skew_s` (default 300 s) from the host clock (pre-NTP / boot-relative), falls back to server receive time, mirroring the CSI policy. Malformed lines bump `dropped_lines`.
 
 Two format variants detected by field count:
 - **ESP32-S3** (25/26 columns): `local_timestamp` at index 18, `data` at index 24 (or -2 with `timestamp_real` appended).
 - **ESP32-C5/C6** (14/15 columns): `local_timestamp` at index 9, `data` at index 13 (or -2).
 
-Timestamp handling: the firmware NTP-stamps the trailing `timestamp_real` column (UNIX epoch seconds with microseconds). Until its first NTP sync it sends `0.000000`, so the backend falls back to `UNIX_START_TIME + (local_timestamp - OFFSET_TIME) / 1_000_000.0`, where the baseline is captured on the first valid row of each connection. The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes — `_compute_timestamp` detects wraparound and accumulates overflow.
+Timestamp handling: the firmware NTP-stamps the trailing `timestamp_real` column (UNIX epoch seconds with microseconds). **Before its first NTP sync, ESP-IDF's `gettimeofday()` returns seconds since boot — a positive 1970-epoch value (e.g. `12.345678`), not `0.000000` as the firmware comments claim.** The backend therefore trusts a live `timestamp_real` only when it is finite, at/after 2020-01-01, and within `timestamp_max_skew_s` (default ±300 s) of the host clock (`app/timestamps.py`). Otherwise it substitutes a host-clock estimate: CSI uses `UNIX_START_TIME + (local_timestamp - OFFSET_TIME) / 1_000_000.0` (baseline captured on the first corrected row of each connection; the 32-bit ~71.6 min wrap, backward counter resets, gaps > 4000 s, and `uptime_s` drops are handled), while smoke uses receive time. Corrections increment `MqttStatus.timestamps_corrected` and are surfaced in `/api/status` and the WS status message. CSV replay bypasses correction so recorded capture times are preserved. All timestamps are UTC epoch seconds — the host timezone (Asia/Manila, PST +0800) only affects local display and report month grouping.
 
 Subcarrier layout for 128 I/Q values (64 subcarriers, ESP-IDF FFT-bin order): DC null (pair 0), data (1–26 → sc +1…+26), upper guard (27–31 → sc +27…+31), lower guard (32–37 → sc −32…−27), data (38–63 → sc −26…−1). Signed subcarrier number: `sc = idx < 32 ? idx : idx − 64`.
 
@@ -129,7 +129,11 @@ Server → client at `GET /ws`:
  "cnt10": 4, "temp_c": 27.34, "pressure_hpa": 998.2, "humidity_pct": 48.5,
  "gas_kohm": 120.4, "altitude_m": 45.2, "rssi": -52}
 {"type": "status", "mqtt": "connected", "packets": 5000, "dropped_lines": 0,
- "receiver_online": true, "ntp_synced": true, ...}
+ "receiver_online": true, "ntp_synced": true,
+ "internet_ntp_state": "online", "internet_ntp_server": "pool.ntp.org",
+ "internet_ntp_offset_s": 0.012, "internet_ntp_rtt_s": 0.024,
+ "internet_ntp_last_checked_at": 1795002583.0, "internet_ntp_error": null,
+ "timestamps_corrected": 0, "last_timestamp_correction_at": null}
 {"type": "alert", "id": 42, "detected_at": 1790756577.8,
  "label": "fusion", "p_csi": 0.87, "p_sensor": 0.95, "fused_score": 0.93}
 {"type": "pong"}
@@ -138,6 +142,8 @@ Server → client at `GET /ws`:
 The `metadata` field is always present (including `subcarrier_wrap_idx` for signed-subcarrier mapping). For LLTF / unknown subcarrier counts, metadata is computed dynamically — it is never `null` for valid data.
 
 Periodic status messages broadcast every 5 seconds. Clients may send `{"type": "ping"}` — server responds `{"type": "pong"}`. The `alert` message fires when a smoking activity is detected (toast trigger); `label` distinguishes `fusion` (CSI + sensor agree), `smoke_only` (sensor-only "possible" activity) and the experimental `csi_only` (CSI gesture with the sensor below its gate; weakest class).
+
+**Internet/NTP status (`app/ntp.py`, `app/status.py`):** `ntp_synced` is the receiver's own SNTP flag from `home/csi/status`; `internet_ntp_state` is the backend's application-level probe (`online` / `offline` / `checking` / `unknown`) of whether *this machine* can reach an NTP server. The raw-UDP SNTP probe (no extra dependency; outbound UDP 123 must be allowed, which Docker bridge NAT normally permits) starts at application startup as a non-blocking task (it never delays MQTT ingestion), rechecks every `ntp_recheck_interval_s` (default 300 s; 0 disables), and can be forced by `POST /api/ntp/check` (bearer). Record correction is value-driven and independent of the probe, so an ESP32 that failed to sync is corrected even while the host is online. The dashboard header shows an `NtpBadge` with a refresh button; the tooltip adds server, offset/RTT, last check, receiver clock state, and the correction count.
 
 ### Smoking-activity detection (`app/inference.py`, `app/detection.py`, `app/detection_store.py`, `app/routes/detection.py`)
 
@@ -167,7 +173,7 @@ The real recognition pipeline is wired in: sensor SVM + CSI ResNet-LSTM + gated 
     -d '{"username":"admin","new_password":"password123","secret":"<PASSWORD_RESET_SECRET>"}'
   ```
 
-- Scope: the UI is gated (frontend `AuthGate` hides the dashboard) and every mutating/destructive route requires a valid bearer token (`Depends(get_current_user)`) — `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`, `GET /api/cleanup`. Read-only routes and `/ws` stay open. JWTs are stateless: logout and password resets do not revoke issued tokens; they expire on their own.
+- Scope: the UI is gated (frontend `AuthGate` hides the dashboard) and every mutating/destructive/action route requires a valid bearer token (`Depends(get_current_user)`) — `POST /api/ntp/check`, `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`, `GET /api/cleanup`. Read-only routes and `/ws` stay open. JWTs are stateless: logout and password resets do not revoke issued tokens; they expire on their own.
 - Config gotcha: `BaseSettings` keeps pydantic-settings' default `extra='forbid'`, and unknown keys in a dotenv **file** are injected into validation — a stale key would crash startup. `Settings` therefore sets `dotenv_filtering="only_existing"` (pydantic-settings ≥ 2.14), so old/removed `.env` keys are harmless; unknown **environment** variables were always ignored. New settings must still be declared as fields in `app/config.py` to take effect (env var names are the upper-cased field names). The two auth secrets are the only required fields.
 
 ### REST API (`app/routes/api.py`, `app/routes/detection.py`)
@@ -175,7 +181,8 @@ The real recognition pipeline is wired in: sensor SVM + CSI ResNet-LSTM + gated 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | `{status, mqtt_connected, packets_received, dropped_lines, influxdb_connected}` |
-| `GET /api/status` | Detailed status with uptime, reconnect attempts, receiver online / NTP-sync state, WS client count |
+| `GET /api/status` | Detailed status with uptime, reconnect attempts, receiver online / firmware NTP-sync state, internet NTP probe state, timestamp-correction counters, WS client count |
+| `POST /api/ntp/check` | Re-probe internet/NTP connectivity now (single-flight, never raises); returns the fresh probe state and broadcasts a status message; requires a bearer token |
 | `GET /api/readings/latest?limit=N` | N most recent readings (default 10, max 500) |
 | `GET /api/readings?start=<ISO>&stop=<ISO>&limit=N` | Time-range query (start required, max 10000) |
 | `GET /api/cleanup` | Manually trigger retention cleanup (deletes readings older than `csi_retention_days`, default 7) |
@@ -189,7 +196,7 @@ The real recognition pipeline is wired in: sensor SVM + CSI ResNet-LSTM + gated 
 | `POST /api/auth/login` | Body `{username, password}` → `{token, expires_at}`; 401 on bad credentials |
 | `POST /api/auth/reset-password` | Body `{username, new_password, secret}`; requires a valid bearer token (401), 403 on bad secret, 404 unknown user |
 
-**Bearer-token required** (`Authorization: Bearer <JWT>`): `GET /api/cleanup`, `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`. All other routes are open.
+**Bearer-token required** (`Authorization: Bearer <JWT>`): `GET /api/cleanup`, `POST /api/ntp/check`, `POST /api/detection/config`, `POST /api/detection/baseline`, `DELETE /api/detection/events/{id}`. All other routes are open.
 
 ## ESP-IDF Build System (sibling components)
 
@@ -222,7 +229,7 @@ ESP32-S3 CSV columns:
 
 - `data`: JSON array of interleaved I/Q integers — `[I1, Q1, I2, Q2, ...]`. Length matches the `len` field (128 = 64 subcarriers for HT40 on S3).
 - `local_timestamp`: ESP32 monotonic microsecond counter (u32, wraps every ~71.6 min).
-- `timestamp_real`: UNIX epoch (float seconds with microseconds), stamped by the ESP32 via NTP — `0.000000` until its first sync, at which point the backend falls back to receive-time estimation.
+- `timestamp_real`: UNIX epoch (float seconds with microseconds), stamped by the ESP32 via NTP. Before its first sync it is **seconds since boot** (~1970 epoch, positive); the backend trusts it only within ±`timestamp_max_skew_s` of the host clock and otherwise replaces it with a host-clock estimate (see Timestamp handling above).
 - The receiver applies AGC/FFT gain compensation (baseline sampled over first 100 packets).
 
 ## InfluxDB Troubleshooting
@@ -269,7 +276,7 @@ cd frontend && npm run dev
 cd frontend && npm run build   # → dist/
 ```
 
-### Architecture (19 source files)
+### Architecture (20 source files)
 
 - **100 Hz data path**: CSI frames arrive via WebSocket → parsed → `csiStore.pushFrame()` computes amplitude (`sqrt(I²+Q²)`) and pushes into a module-level ring buffer (max 600 frames, ~6 s at 100 Hz). No React re-renders per frame.
 - **Canvas at 60 fps**: `StripChart` (exported from `WaterfallChart.tsx`) runs its own `requestAnimationFrame` loop, pulling the latest frame from the store, maintaining a 600-frame ring buffer, and calling the pure render function `drawStripChart()`.
@@ -279,9 +286,9 @@ cd frontend && npm run build   # → dist/
   - **VOC panel** (`VocPanel.tsx`, left): rAF loop calling `drawVocChart()` — single-series gas-resistance (kΩ) chart. Gas *drops* under VOC exposure, so the Y scale uses an EMA peak-hold ceiling **plus a min-hold floor** (see `getGasAutoScaleMax/Min()` in the store) with a span guard. Temperature/pressure/humidity/altitude render as stat tiles via the store's rAF-coalesced subscription; legacy firmware (no BME680 block) leaves the chart in its empty state — samples with `gas_kohm === undefined` are never plotted. Validated CVD-safe series colour (see `drawVocChart.ts` header comment); direct end-label carries the current value.
   - **Air Quality panel** (`AirQualityPanel.tsx`, right): numbers only, no chart — PM1.0/PM2.5/PM10 hero tiles, "Particles / 0.1 L" count grid, RSSI. Tiles update via the rAF-coalesced subscription.
   - Sensor offline → both panels dim + `SENSOR OFFLINE` badge / stale note.
-- **Dashboard layout** (`src/App.tsx`): Header (branding, WS badge, theme toggle), left sidebar (live metrics card, trivia card), main chart area (CSI chart on top, bottom-panels row below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit.
+- **Dashboard layout** (`src/App.tsx`): Header (branding, NTP badge + refresh, WS badge, theme toggle), left sidebar (live metrics card, trivia card), main chart area (CSI chart on top, bottom-panels row below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit. The **NTP badge** (`NtpBadge.tsx`) shows `internet_ntp_state` (green Active / red Connection Error / amber Checking) with a `↻` button that calls `POST /api/ntp/check` via `authFetch`; its tooltip also shows the server, offset/RTT, last check, the receiver's `ntp_synced`, and the correction count.
 - **Trivia** (`src/hooks/useSmokingFacts.ts`): Fetches intro extracts from 15 Wikipedia smoking-related articles on first load, parses into sentences, combines with 30 hand-picked fallback facts, and caches in `localStorage` for 24 hours. Rotates every 8 seconds in the sidebar.
-- **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore` and `smoke` messages to `smokeStore`.
+- **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore`, `smoke` messages to `smokeStore`, `alert` messages to `alertStore`, and keeps the latest `status` message in React state for the NTP badge.
 - **Auth**: `AuthGate` (rendered by `main.tsx`) sits above `App` — the dashboard and its WebSocket only mount with a valid, non-expired session in `localStorage` (`smokeguard-token` = `{token, expires_at}`). `LoginPage` posts to `/api/auth/login`; the header's Log out button clears the session. Token-required calls go through `authFetch` (`src/session.ts`), which attaches the bearer header and forces a re-login on 401. No reset UI (API-only by design).
 - **No charting libraries, no state management libraries** — pure Canvas 2D API rendering.
 
@@ -299,6 +306,7 @@ cd frontend && npm run build   # → dist/
 | `src/components/WaterfallChart.tsx` | Canvas component (exports `StripChart`) — rAF loop, 600-frame buffer, pause toggle, DPR-aware canvas sizing, accepts `theme` prop |
 | `src/components/VocPanel.tsx` | Bottom-left VOC panel — rAF canvas (gas resistance), environmental stat tiles (temp/pressure/humidity/altitude), staleness dimming, pause toggle |
 | `src/components/AirQualityPanel.tsx` | Bottom-right air-quality panel — numbers only: PM1.0/PM2.5/PM10 hero tiles, particle counts, RSSI, staleness dimming + offline badge |
+| `src/components/NtpBadge.tsx` | Header internet/NTP status badge + refresh button — consumes the WS `status` snapshot, prefers a newer `POST /api/ntp/check` result, tooltip with server/offset/RTT/receiver clock/correction count |
 | `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia), main chart + bottom sensor panels, footer |
 | `src/types.ts` | `CsiFrame`, `SmokeSample`, `WsMessage`, `SubcarrierMetadata`, `MetricsSnapshot` |
 | `src/session.ts` | Admin session persistence — `saveSession`/`loadSession`/`clearSession`/`isSessionValid` (localStorage `smokeguard-token`) |
@@ -348,6 +356,8 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | InfluxDB write batch | 500 points / 1000ms | `WriteOptions` in `influxdb_client.py` |
 | Async queue size | 2000 | `main.py` consumer |
 | WS per-client queue | 256 | `ws_queue_maxsize` in Settings |
+| Internet NTP probe | startup + every 300 s; manual refresh | `ntp_servers` / `ntp_timeout_s` / `ntp_recheck_interval_s` |
+| Timestamp validity | ±300 s from host clock (+ 2020 floor) | `timestamp_max_skew_s` in Settings |
 | CSI checkpoint | `models/csi_resnet_lstm_7class.keras` (7-class, LSTM 96) | `csi_model_path` in Settings |
 | CSI calibrator | `models/csi_resnet_lstm_7class.platt.json` (schema 2) | `csi_platt_path` in Settings |
 | Detection interval | 0.2 s | `detection_interval_s` in Settings |
@@ -363,3 +373,8 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `mqtt_reader.py` |
 | JWT lifetime | 7 days | `jwt_expire_days` in Settings (`JWT_EXPIRE_DAYS`) |
 | Auth secrets | separate signing + reset secrets | `JWT_SECRET` / `PASSWORD_RESET_SECRET` in `.env` (generate: `scripts/setup_auth_secrets.sh`) |
+
+Note: `scripts/mockup_detection_event.py` publishes an intentionally 600 s
+backdated sensor baseline, which is older than the default ±300 s validity
+window. Start the backend with `TIMESTAMP_MAX_SKEW_S=3600` when using the
+mockup; leave the default for live hardware.

@@ -278,7 +278,20 @@ class WSStatus(WSMessage):
     last_record_at: float | None = None
     error: str | None = None
     receiver_online: bool | None = None
+    # Receiver-reported SNTP state (from home/csi/status); unrelated to
+    # internet_ntp_state, which is the backend's own connectivity probe.
     ntp_synced: bool | None = None
+    internet_ntp_state: Literal[
+        "online", "offline", "checking", "unknown"
+    ] = "unknown"
+    internet_ntp_server: str | None = None
+    internet_ntp_offset_s: float | None = None
+    internet_ntp_rtt_s: float | None = None
+    internet_ntp_last_checked_at: float | None = None
+    internet_ntp_error: str | None = None
+    # Live records whose firmware timestamp was replaced from the host clock.
+    timestamps_corrected: int = 0
+    last_timestamp_correction_at: float | None = None
 
 
 # Alert classes, weakest first: csi_only (experimental) < smoke_only < fusion.
@@ -323,10 +336,34 @@ class StatusResponse(BaseModel):
     last_record_at: float | None = None
     reconnect_attempts: int = 0
     receiver_online: bool | None = None
+    # Receiver-reported SNTP state (home/csi/status), not the backend probe.
     ntp_synced: bool | None = None
+    internet_ntp_state: Literal[
+        "online", "offline", "checking", "unknown"
+    ] = "unknown"
+    internet_ntp_server: str | None = None
+    internet_ntp_offset_s: float | None = None
+    internet_ntp_rtt_s: float | None = None
+    internet_ntp_last_checked_at: float | None = None
+    internet_ntp_error: str | None = None
+    timestamps_corrected: int = 0
+    last_timestamp_correction_at: float | None = None
     influxdb_connected: bool
     websocket_clients: int
     uptime_seconds: float
+
+
+class NtpStatusResponse(BaseModel):
+    """POST /api/ntp/check response — fresh application-level NTP probe."""
+
+    internet_ntp_state: Literal[
+        "online", "offline", "checking", "unknown"
+    ] = "unknown"
+    internet_ntp_server: str | None = None
+    internet_ntp_offset_s: float | None = None
+    internet_ntp_rtt_s: float | None = None
+    internet_ntp_last_checked_at: float | None = None
+    internet_ntp_error: str | None = None
 
 
 class HistoryPoint(BaseModel):

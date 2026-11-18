@@ -9,6 +9,7 @@ import StripChart from './components/WaterfallChart';
 import VocPanel from './components/VocPanel';
 import AirQualityPanel from './components/AirQualityPanel';
 import DetectionToggle from './components/DetectionToggle';
+import NtpBadge from './components/NtpBadge';
 import HistoryView from './components/HistoryView';
 import DetectionDetailView from './components/DetectionDetailView';
 import ToastStack from './components/ToastStack';
@@ -39,7 +40,7 @@ interface AppProps {
 }
 
 export default function App({ onLogout }: AppProps) {
-  const { state, reconnect } = useWebSocket();
+  const { state, reconnect, status } = useWebSocket();
   const [metrics, setMetrics] = useState<MetricsSnapshot>(getMetrics());
   const [theme, setTheme] = useState<Theme>(resolveTheme);
   const [factIdx, setFactIdx] = useState(0);
@@ -113,6 +114,7 @@ export default function App({ onLogout }: AppProps) {
         </nav>
 
         <div className="header-right">
+          <NtpBadge status={status} />
           <span className={`badge ${wsStatusClass(state)}`}>
             <span className="dot" />{wsLabel}
           </span>

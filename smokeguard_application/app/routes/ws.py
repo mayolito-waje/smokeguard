@@ -7,7 +7,8 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.models import WSCsiData, WSStatus, WSWelcome
+from app.models import WSWelcome
+from app.status import build_ws_status
 from app.websocket_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -40,17 +41,12 @@ async def websocket_endpoint(
         ).model_dump()
     ))
 
-    # Send current MQTT status
-    status_snapshot = mqtt_status.snapshot()
+    # Send current MQTT + internet/NTP status
+    ntp_monitor = getattr(websocket.app.state, "ntp", None)
     await websocket.send_text(json.dumps(
-        WSStatus(
-            mqtt=mqtt_status.transport_state(),
-            packets=status_snapshot["packets"],
-            dropped_lines=status_snapshot["dropped_lines"],
-            last_record_at=status_snapshot["last_record_at"],
-            error=status_snapshot["error"],
-            receiver_online=status_snapshot["receiver_online"],
-            ntp_synced=status_snapshot["ntp_synced"],
+        build_ws_status(
+            mqtt_status,
+            ntp_monitor.snapshot() if ntp_monitor is not None else None,
         ).model_dump()
     ))
 

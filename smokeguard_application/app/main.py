@@ -23,9 +23,11 @@ from app.config import get_settings
 from app.detection import DetectionManager
 from app.detection_store import DetectionStore
 from app.influxdb_client import InfluxClient
-from app.models import CSIRecord, SmokeRecord, WSCsiData, WSSmokeData, WSStatus
+from app.models import CSIRecord, SmokeRecord, WSCsiData, WSSmokeData
 from app.mqtt_reader import CsiMqttReader
+from app.ntp import NtpMonitor
 from app.routes import api, auth, detection, ws
+from app.status import build_ws_status
 from app.websocket_manager import ConnectionManager
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,15 @@ def create_app() -> FastAPI:
     # Public settings handle for routes (report rendering, etc.).
     app.state.settings = settings
 
+    # Application-level internet/NTP probe.  Constructed here so routes can
+    # always reach it; its first check runs in the startup task below.
+    ntp_monitor = NtpMonitor(
+        settings.ntp_server_list,
+        settings.ntp_timeout_s,
+        settings.ntp_recheck_interval_s,
+    )
+    app.state.ntp = ntp_monitor
+
     # ------------------------------------------------------------------
     # CORS — allow React dev server and production builds
     # ------------------------------------------------------------------
@@ -80,6 +91,13 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def on_startup() -> None:
         nonlocal influx, ws_manager, mqtt_reader
+
+        # Internet/NTP probe: start it first, but do not block ingestion on
+        # DNS/UDP timeouts — record timestamps are corrected by value, not by
+        # this probe.  The task performs the initial check immediately.
+        ntp_task = asyncio.create_task(
+            ntp_monitor.run_periodic(), name="ntp-monitor"
+        )
 
         # Connect to InfluxDB
         influx = InfluxClient(settings)
@@ -201,17 +219,14 @@ def create_app() -> FastAPI:
         async def broadcast_status() -> None:
             while True:
                 await asyncio.sleep(5.0)
-                if ws_manager and ws_manager.client_count > 0:
-                    snap = mqtt_reader.status.snapshot() if mqtt_reader else {}
+                if (
+                    ws_manager
+                    and ws_manager.client_count > 0
+                    and mqtt_reader is not None
+                ):
                     await ws_manager.broadcast_sync(
-                        WSStatus(
-                            mqtt=mqtt_reader.status.transport_state(),
-                            packets=snap.get("packets", 0),
-                            dropped_lines=snap.get("dropped_lines", 0),
-                            last_record_at=snap.get("last_record_at"),
-                            error=snap.get("error"),
-                            receiver_online=snap.get("receiver_online"),
-                            ntp_synced=snap.get("ntp_synced"),
+                        build_ws_status(
+                            mqtt_reader.status, ntp_monitor.snapshot()
                         ).model_dump()
                     )
 
@@ -242,6 +257,7 @@ def create_app() -> FastAPI:
         app.state._model_warmup_task = model_warmup_task
         app.state._status_task = status_task
         app.state._cleanup_task = cleanup_task
+        app.state._ntp_task = ntp_task
         app.state._queue = queue
         app.state._smoke_queue = smoke_queue
         app.state._settings = settings
@@ -257,7 +273,7 @@ def create_app() -> FastAPI:
             await smoke_queue.put(None)
 
         # Cancel tasks
-        for attr in ("_consumer_task", "_smoke_consumer_task", "_detection_task", "_model_warmup_task", "_status_task", "_cleanup_task"):
+        for attr in ("_consumer_task", "_smoke_consumer_task", "_detection_task", "_model_warmup_task", "_status_task", "_cleanup_task", "_ntp_task"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

@@ -497,7 +497,14 @@ def main() -> int:
                         help="CSI span to replay (backend scans 4.0-7.0 s)")
     parser.add_argument("--smoke-window", type=float,
                         default=settings.detection_smoke_seconds)
-    parser.add_argument("--baseline-seconds", type=float, default=600.0)
+    parser.add_argument(
+        "--baseline-seconds", type=float, default=600.0,
+        help="Backdated clean-air baseline length. The backend treats live "
+             "timestamps older than TIMESTAMP_MAX_SKEW_S (default 300 s) as "
+             "pre-NTP and rewrites them from its clock; start the backend "
+             "with TIMESTAMP_MAX_SKEW_S=3600 when using the default 600 s "
+             "baseline.")
+
     parser.add_argument("--cadence", type=float, default=0.58)
     parser.add_argument("--ramp-fraction", type=float, default=0.25)
     parser.add_argument("--lead-in", type=float, default=3.0,

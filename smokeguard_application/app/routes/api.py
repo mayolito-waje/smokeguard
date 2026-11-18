@@ -15,11 +15,11 @@ from app.models import (
     HealthResponse,
     HistoryPoint,
     HistoryResponse,
+    NtpStatusResponse,
     StatusResponse,
-    WSCsiData,
-    WSStatus,
 )
 from app.mqtt_reader import MqttStatus
+from app.status import build_ws_status
 
 if TYPE_CHECKING:
     from app.influxdb_client import InfluxClient
@@ -49,6 +49,11 @@ def _get_mqtt_status(request: Request) -> MqttStatus:
     return request.app.state.mqtt_status  # type: ignore[attr-defined]
 
 
+def _get_ntp(request: Request):
+    """Return the application-level NTP monitor, if startup created one."""
+    return getattr(request.app.state, "ntp", None)
+
+
 # ------------------------------------------------------------------
 # Health
 # ------------------------------------------------------------------
@@ -75,6 +80,8 @@ async def health_check(request: Request) -> HealthResponse:
 async def get_status(request: Request) -> StatusResponse:
     """Detailed live status of the CSI data pipeline."""
     mqtt_status = _get_mqtt_status(request).snapshot()
+    ntp_monitor = _get_ntp(request)
+    ntp_status = ntp_monitor.snapshot() if ntp_monitor else {}
     influx_client = _get_influx(request)
     ws_manager = _get_ws_manager(request)
     return StatusResponse(
@@ -85,9 +92,60 @@ async def get_status(request: Request) -> StatusResponse:
         reconnect_attempts=mqtt_status["reconnect_attempts"],
         receiver_online=mqtt_status["receiver_online"],
         ntp_synced=mqtt_status["ntp_synced"],
+        internet_ntp_state=ntp_status.get("state", "unknown"),
+        internet_ntp_server=ntp_status.get("server"),
+        internet_ntp_offset_s=ntp_status.get("offset_s"),
+        internet_ntp_rtt_s=ntp_status.get("rtt_s"),
+        internet_ntp_last_checked_at=ntp_status.get("last_checked_at"),
+        internet_ntp_error=ntp_status.get("error"),
+        timestamps_corrected=mqtt_status["timestamps_corrected"],
+        last_timestamp_correction_at=mqtt_status["last_timestamp_correction_at"],
         influxdb_connected=influx_client.connected,
         websocket_clients=ws_manager.client_count,
         uptime_seconds=time.time() - SERVER_START_TIME,
+    )
+
+
+@router.post(
+    "/ntp/check",
+    response_model=NtpStatusResponse,
+    responses={401: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+async def check_internet_ntp(
+    request: Request, _user: str = Depends(get_current_user)
+) -> NtpStatusResponse:
+    """Re-probe internet/NTP connectivity now (dashboard refresh button).
+
+    Requires a bearer token, matching the other action routes.  The probe never
+    raises; a failed check returns the offline state with an error message.
+    """
+    ntp_monitor = _get_ntp(request)
+    if ntp_monitor is None:
+        raise HTTPException(status_code=503, detail="NTP monitor not available")
+
+    status_snapshot = await ntp_monitor.refresh()
+
+    # Push the fresh state to every connected dashboard immediately; the 5 s
+    # periodic broadcast keeps it current afterwards.
+    ws_manager = _get_ws_manager(request)
+    if ws_manager.client_count > 0:
+        await ws_manager.broadcast_sync(
+            build_ws_status(
+                _get_mqtt_status(request), status_snapshot
+            ).model_dump()
+        )
+
+    logger.info(
+        "Internet NTP re-checked by %s: %s",
+        _user, status_snapshot.get("state"),
+    )
+    return NtpStatusResponse(
+        internet_ntp_state=status_snapshot.get("state", "unknown"),
+        internet_ntp_server=status_snapshot.get("server"),
+        internet_ntp_offset_s=status_snapshot.get("offset_s"),
+        internet_ntp_rtt_s=status_snapshot.get("rtt_s"),
+        internet_ntp_last_checked_at=status_snapshot.get("last_checked_at"),
+        internet_ntp_error=status_snapshot.get("error"),
     )
 
 
