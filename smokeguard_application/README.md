@@ -81,6 +81,7 @@ injected into the containers wholesale, and the internal addresses
 | `JWT_SECRET` / `PASSWORD_RESET_SECRET` | development values | Login token signing / password reset |
 | `TZ` | `Asia/Manila` | Local display, month grouping, and PDF timestamps (record times stay UTC epoch) |
 | `REPORT_FACILITY` | `DLSU-D PBH320` | Facility name printed in PDF reports |
+| `VITE_GITHUB_REPO` | `https://github.com/mayolito-waje/smokeguard` | Repository linked from Model Info source rows (build-time; rebuild the frontend after changing) |
 
 Notes:
 
@@ -99,8 +100,11 @@ Notes:
   badge reports a connection error, but MQTT ingestion and host-clock timestamp
   correction keep working — the probe is advisory.
 - The **Model Info** tab is built from the static
-  `frontend/src/data/modelInfo.ts` snapshot, so it needs no Compose variables;
-  update that module after retraining.
+  `frontend/src/data/modelInfo.ts` snapshot, so it needs no **runtime**
+  variables; update that module after retraining. Its provenance links use
+  the build-time `VITE_GITHUB_REPO` (defaults to this repository) — after
+  changing it, rebuild the frontend:
+  `docker compose up --build -d frontend`.
 - When running `scripts/mockup_detection_event.py` against the Compose stack,
   set `TIMESTAMP_MAX_SKEW_S=3600` in `.env` and recreate the backend: the
   mockup's clean-air baseline is intentionally backdated 600 s, while the

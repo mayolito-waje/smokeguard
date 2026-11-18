@@ -131,6 +131,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Baked into the static bundle at build time; rebuild the frontend
+        # image after changing it.
+        VITE_GITHUB_REPO: "${VITE_GITHUB_REPO:-https://github.com/mayolito-waje/smokeguard}"
     restart: unless-stopped
     depends_on:
       backend:
