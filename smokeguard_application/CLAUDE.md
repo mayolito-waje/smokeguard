@@ -276,7 +276,7 @@ cd frontend && npm run dev
 cd frontend && npm run build   # → dist/
 ```
 
-### Architecture (23 source files)
+### Architecture (24 source files)
 
 - **100 Hz data path**: CSI frames arrive via WebSocket → parsed → `csiStore.pushFrame()` computes amplitude (`sqrt(I²+Q²)`) and pushes into a module-level ring buffer (max 600 frames, ~6 s at 100 Hz). No React re-renders per frame.
 - **Canvas at 60 fps**: `StripChart` (exported from `WaterfallChart.tsx`) runs its own `requestAnimationFrame` loop, pulling the latest frame from the store, maintaining a 600-frame ring buffer, and calling the pure render function `drawStripChart()`.
@@ -287,7 +287,7 @@ cd frontend && npm run build   # → dist/
   - **Air Quality panel** (`AirQualityPanel.tsx`, right): numbers only, no chart — PM1.0/PM2.5/PM10 hero tiles, "Particles / 0.1 L" count grid, RSSI. Tiles update via the rAF-coalesced subscription.
   - Sensor offline → both panels dim + `SENSOR OFFLINE` badge / stale note.
 - **Dashboard layout** (`src/App.tsx`): Header (branding, Live/History/Model Info tabs, NTP badge + refresh, WS badge, theme toggle), left sidebar (live metrics card, trivia card), main chart area (CSI chart on top, bottom-panels row below), footer. Theme persisted to `localStorage`, respects `prefers-color-scheme` on first visit. The **NTP badge** (`NtpBadge.tsx`) shows `internet_ntp_state` (green Active / red Connection Error / amber Checking) with a `↻` button that calls `POST /api/ntp/check` via `authFetch`; its tooltip also shows the server, offset/RTT, last check, the receiver's `ntp_synced`, and the correction count.
-- **Model Info page** (`ModelInfoView.tsx`, `ConfusionMatrix.tsx`, `data/modelInfo.ts`): a read-only documentation tab behind the AuthGate with the CSI, sensor, and late-fusion metrics, per-class precision/recall/F1 tables, accessible confusion matrices (row-share heat shading), a plain-language metric guide, FAQ, and provenance. All numbers are a **static snapshot** from the training notebooks and model sidecars in `src/data/modelInfo.ts` — nothing is fetched at runtime. The page is deliberately explicit that the CSI test split is within-session (optimistic), the sensor holdout is one recording, and fusion is a simulated CSI×sensor cross-product, not paired real data; `smoke_only` is excluded from the paper/fusion metrics. Update `modelInfo.ts` and bump `SNAPSHOT_DATE` after retraining.
+- **Model Info page** (`ModelInfoView.tsx`, `ConfusionMatrix.tsx`, `data/modelInfo.ts`): a read-only documentation tab behind the AuthGate with the CSI, sensor, and late-fusion metrics, per-class precision/recall/F1 tables, accessible confusion matrices (row-share heat shading), a plain-language metric guide, a grouped FAQ (three headings, native `<details>`, Expand all / Collapse all), and provenance rows that **link to the sources on GitHub `main`**. All numbers are a **static snapshot** from the training notebooks and model sidecars in `src/data/modelInfo.ts` — nothing is fetched at runtime. Source URLs come from `src/github.ts`, which reads the build-time `VITE_GITHUB_REPO` (Compose build arg; default is this repository) and falls back to the canonical repo for `npm run dev`. The page is deliberately explicit that the CSI test split is within-session (optimistic), the sensor holdout is one recording, and fusion is a simulated CSI×sensor cross-product, not paired real data; `smoke_only` is excluded from the paper/fusion metrics. Update `modelInfo.ts` and bump `SNAPSHOT_DATE` after retraining.
 - **Trivia** (`src/hooks/useSmokingFacts.ts`): Fetches intro extracts from 15 Wikipedia smoking-related articles on first load, parses into sentences, combines with 30 hand-picked fallback facts, and caches in `localStorage` for 24 hours. Rotates every 8 seconds in the sidebar.
 - **WebSocket**: `useWebSocket` hook — exponential backoff reconnect (1s→15s cap), 25s heartbeat pings, dispatches `csi` messages to `csiStore`, `smoke` messages to `smokeStore`, `alert` messages to `alertStore`, and keeps the latest `status` message in React state for the NTP badge.
 - **Auth**: `AuthGate` (rendered by `main.tsx`) sits above `App` — the dashboard and its WebSocket only mount with a valid, non-expired session in `localStorage` (`smokeguard-token` = `{token, expires_at}`). `LoginPage` posts to `/api/auth/login`; the header's Log out button clears the session. Token-required calls go through `authFetch` (`src/session.ts`), which attaches the bearer header and forces a re-login on 401. No reset UI (API-only by design).
@@ -308,7 +308,8 @@ cd frontend && npm run build   # → dist/
 | `src/components/VocPanel.tsx` | Bottom-left VOC panel — rAF canvas (gas resistance), environmental stat tiles (temp/pressure/humidity/altitude), staleness dimming, pause toggle |
 | `src/components/AirQualityPanel.tsx` | Bottom-right air-quality panel — numbers only: PM1.0/PM2.5/PM10 hero tiles, particle counts, RSSI, staleness dimming + offline badge |
 | `src/components/NtpBadge.tsx` | Header internet/NTP status badge + refresh button — consumes the WS `status` snapshot, prefers a newer `POST /api/ntp/check` result, tooltip with server/offset/RTT/receiver clock/correction count |
-| `src/data/modelInfo.ts` | Static Model Info snapshot — CSI/sensor/fusion metrics, per-class rows, confusion matrices, metric glossary, FAQ, provenance, `SNAPSHOT_DATE` |
+| `src/data/modelInfo.ts` | Static Model Info snapshot — CSI/sensor/fusion metrics, per-class rows, confusion matrices, metric glossary, grouped FAQ data, provenance paths, `SNAPSHOT_DATE` |
+| `src/github.ts` | Build-time repository URL helper — `GITHUB_REPO` from `VITE_GITHUB_REPO`, `githubBlobUrl(path)` for Model Info source links |
 | `src/components/ModelInfoView.tsx` | Model Info tab — pipeline overview, model cards, per-class tables, collapsible raw/binary/unseen results, glossary, FAQ, provenance |
 | `src/components/ConfusionMatrix.tsx` | Accessible confusion-matrix table — captions/scoped headers, row-share heat ramp, row/column totals, compact 2×2 layout, keyboard-scrollable wrapper |
 | `src/App.tsx` | Dashboard shell — header (branding, WS badge, theme toggle), sidebar (metrics, trivia), main chart + bottom sensor panels, footer |
@@ -374,6 +375,7 @@ Vite dev server proxies `/ws` (WebSocket) and `/api` (REST) to `localhost:8000`.
 | CSI-only scan cap | 1.0 s | `detection_csi_only_interval_s` |
 | CSI-only extra gate | 0.0 (argmax only) | `detection_csi_only_min_prob` |
 | Report facility / logo | DLSU-D PBH320 / `frontend/public/smokeguard_logo.png` | `report_facility` / `report_logo_path` |
+| Model Info source repo | `https://github.com/mayolito-waje/smokeguard`, baked in at frontend build time | `VITE_GITHUB_REPO` Compose build arg / `src/github.ts` |
 | Replay throttle | 5 ms (~200 Hz) | `REPLAY_THROTTLE` in `mqtt_reader.py` |
 | JWT lifetime | 7 days | `jwt_expire_days` in Settings (`JWT_EXPIRE_DAYS`) |
 | Auth secrets | separate signing + reset secrets | `JWT_SECRET` / `PASSWORD_RESET_SECRET` in `.env` (generate: `scripts/setup_auth_secrets.sh`) |

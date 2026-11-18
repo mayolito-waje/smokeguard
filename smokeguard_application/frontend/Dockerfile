@@ -3,6 +3,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Build-time only: Vite inlines this into the static bundle (Model Info
+# source links). Keep the default in sync with src/github.ts.
+ARG VITE_GITHUB_REPO=https://github.com/mayolito-waje/smokeguard
+ENV VITE_GITHUB_REPO=$VITE_GITHUB_REPO
 RUN npm run build
 
 FROM nginx:1.27-alpine
