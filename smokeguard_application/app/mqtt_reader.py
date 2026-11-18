@@ -9,14 +9,16 @@ Key features:
 - paho-mqtt network thread replaces the old serial thread; on_message runs
   off the event loop and pushes records via call_soon_threadsafe
 - The firmware NTP-stamps the trailing timestamp_real column; before its
-  first sync it sends 0.000000, so the backend falls back to receive-time
-  estimation from the ESP32's microsecond counter (incl. 32-bit wraparound)
+  first sync ESP-IDF's gettimeofday() returns seconds since boot — a positive
+  1970-epoch value — so live rows are trusted only within the configured skew
+  of the host clock and otherwise replaced with a host-clock estimate from
+  the ESP32's microsecond counter (incl. wraparound/reboot handling)
 - Also subscribes to the status topic to track receiver online / NTP-sync
   state (single-receiver setup assumed — later heartbeats overwrite)
 - The smoke topic carries PMS5003 + BME680 CSV lines (timestamp,pm1_0,...,
   cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,altitude_m,rssi; legacy
-  firmware sends 11 fields without the BME680 block); a 0/negative timestamp
-  falls back to receive time, same as CSI
+  firmware sends 11 fields without the BME680 block); a 0/negative/
+  boot-relative timestamp falls back to receive time, same policy as CSI
 - Auto-reconnect via paho's built-in exponential backoff
 - Replay mode: reads from a .csv file when replay_csv is set (CSI only)
 """
@@ -25,6 +27,7 @@ import asyncio
 import csv
 import json
 import logging
+import math
 import os
 import time
 from io import StringIO
@@ -34,6 +37,7 @@ import paho.mqtt.client as mqtt
 
 from app.config import Settings
 from app.models import CSIRecord, DATA_COLUMNS_C5C6, DATA_COLUMNS_S3, SmokeRecord
+from app.timestamps import select_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,10 @@ class MqttStatus:
         # Smoke (air-quality) counters — debug/status use only
         self.smoke_packets: int = 0
         self.smoke_last_at: float | None = None
+        # Timestamp quality diagnostics (live MQTT only; never reset on
+        # reconnect so the dashboard can show the session total).
+        self.timestamps_corrected: int = 0
+        self.last_timestamp_correction_at: float | None = None
 
     def snapshot(self) -> dict:
         """Return a dict copy of the current status (thread-safe)."""
@@ -79,6 +87,8 @@ class MqttStatus:
                 "last_status_at": self.last_status_at,
                 "smoke_packets": self.smoke_packets,
                 "smoke_last_at": self.smoke_last_at,
+                "timestamps_corrected": self.timestamps_corrected,
+                "last_timestamp_correction_at": self.last_timestamp_correction_at,
             }
 
     def update(self, **kwargs: object) -> None:
@@ -123,12 +133,15 @@ class CsiMqttReader:
         self._stopping = False
         self.status = MqttStatus()
 
-        # Timestamp tracking (reset on each reconnect, used only as a
-        # fallback when the firmware's NTP-stamped timestamp is invalid)
+        # Timestamp tracking (reset on each reconnect, used as the host-clock
+        # estimate whenever the firmware timestamp is implausible)
         self._unix_start_time: float = 0.0
         self._offset_time: int | None = None
         self._prev_local_ts: int | None = None
         self._ts_overflow: int = 0
+        self._last_counter_at: float | None = None
+        self._last_uptime_s: float | None = None
+        self._last_correction_log_at: float | None = None
 
         # Replay mode is selected by the replay_csv setting (empty = live MQTT)
         self._replay_mode = bool(settings.replay_csv)
@@ -282,6 +295,31 @@ class CsiMqttReader:
             return
 
         if data["state"] == "online":
+            if self.status.receiver_online is False:
+                # Back from an LWT offline: the receiver may have rebooted,
+                # so its CSI counter origin may have changed.
+                self._reset_timestamps()
+
+            # The firmware heartbeat carries uptime_s (monotonic since boot).
+            # A drop means a reboot even when the MQTT connection survived.
+            uptime = data.get("uptime_s")
+            if (
+                isinstance(uptime, (int, float))
+                and not isinstance(uptime, bool)
+                and math.isfinite(float(uptime))
+            ):
+                if (
+                    self._last_uptime_s is not None
+                    and float(uptime) + 5.0 < self._last_uptime_s
+                ):
+                    logger.info(
+                        "Receiver uptime dropped (%.0fs -> %.0fs) — "
+                        "re-anchoring CSI timestamps",
+                        self._last_uptime_s, float(uptime),
+                    )
+                    self._reset_timestamps()
+                self._last_uptime_s = float(uptime)
+
             self.status.update(
                 receiver_online=True,
                 ntp_synced=bool(data.get("ntp_synced")),
@@ -403,19 +441,39 @@ class CsiMqttReader:
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
 
-        # Compute timestamp_real
+        # Timestamp: trust the firmware's trailing timestamp_real only when
+        # it is close to the host clock.  Before its first NTP sync ESP-IDF's
+        # gettimeofday() returns seconds since boot — a positive 1970-epoch
+        # value — so a positivity check is not enough.
+        raw_ts: float | None = None
         if has_ts_real and num_fields == len(columns) + 1:
-            # Use the firmware's NTP-stamped timestamp_real
             try:
-                timestamp_real = float(row[-1])
+                raw_ts = float(row[-1])
             except (ValueError, IndexError):
-                timestamp_real = self._compute_timestamp(fields)
-            if timestamp_real <= 0.0:
-                # The ESP32 sends 0.000000 until its first NTP sync —
-                # fall back to receive-time estimation
-                timestamp_real = self._compute_timestamp(fields)
+                raw_ts = None
+
+        now = time.time()
+        try:
+            counter_ts = self._compute_timestamp(fields)
+        except (KeyError, TypeError, ValueError):
+            # local_timestamp is always present in the supported formats,
+            # but never let a malformed counter take the record down.
+            counter_ts = now
+
+        if self._replay_mode:
+            # Recorded data keeps its original capture timestamps; only an
+            # absent/non-finite value falls back to the counter estimate.
+            timestamp_real = (
+                raw_ts
+                if raw_ts is not None and math.isfinite(raw_ts) and raw_ts > 0.0
+                else counter_ts
+            )
         else:
-            timestamp_real = self._compute_timestamp(fields)
+            timestamp_real, corrected = select_timestamp(
+                raw_ts, counter_ts, now, self.settings.timestamp_max_skew_s
+            )
+            if corrected:
+                self._note_timestamp_correction("csi", raw_ts, timestamp_real)
 
         # MAC filter (if configured)
         mac = fields["mac"]
@@ -477,8 +535,8 @@ class CsiMqttReader:
         cnt2_5,cnt5_0,cnt10,temp_c,pressure_hpa,humidity_pct,gas_kohm,
         altitude_m,rssi (no header). Legacy firmware sends 11 fields (no
         BME680) — those fields stay None. timestamp is UNIX epoch seconds;
-        0 (NTP unsynced) falls back to receive time, mirroring the CSI
-        timestamp_real fallback.
+        0/negative or boot-relative values fall back to receive time,
+        mirroring the CSI timestamp_real policy.
         """
         try:
             reader = csv.reader(StringIO(line))
@@ -510,9 +568,18 @@ class CsiMqttReader:
             self.status.update(dropped_lines=self.status.dropped_lines + 1)
             return
 
-        # Sensor clock not NTP-synced yet (or missing) — fall back to
-        # receive time, same as the CSI timestamp_real fallback
-        timestamp_real = ts if ts > 0.0 else time.time()
+        # The sensor clock may be unsynced (0/negative) or, like ESP-IDF's
+        # gettimeofday(), boot-relative before its first NTP sync.  Trust it
+        # only when it is close to the host clock; otherwise use receive time.
+        now = time.time()
+        if self._replay_mode:
+            timestamp_real = ts if math.isfinite(ts) and ts > 0.0 else now
+        else:
+            timestamp_real, corrected = select_timestamp(
+                ts, now, now, self.settings.timestamp_max_skew_s
+            )
+            if corrected:
+                self._note_timestamp_correction("smoke", ts, timestamp_real)
 
         record = SmokeRecord(
             timestamp_real=timestamp_real,
@@ -557,33 +624,56 @@ class CsiMqttReader:
             pass
 
     # ------------------------------------------------------------------
-    # Timestamp computation (fallback only)
+    # Host-clock timestamp estimation
     # ------------------------------------------------------------------
 
     def _compute_timestamp(self, fields: dict) -> float:
         """Estimate a UNIX timestamp from the ESP32's microsecond counter.
 
-        Used only when the firmware-stamped timestamp_real is missing or
-        invalid (pre-NTP-sync). On the first packet of a session (or after
-        reconnect), the current wall-clock time is recorded as
-        UNIX_START_TIME and the ESP32's microsecond counter value is stored
-        as OFFSET_TIME. Subsequent timestamps are computed relative to
-        these baselines.
+        Used as the host-clock substitute whenever the firmware timestamp is
+        implausible (pre-NTP-sync, reboot, malformed value).  On the first
+        packet of a session (or after reconnect/reset), the current wall-clock
+        time and counter value are recorded as the baseline; subsequent
+        timestamps preserve the counter's spacing.
 
         The ESP32's 32-bit microsecond counter wraps every ~71.6 minutes.
-        We detect wraparound (new value < previous by more than 2^31) and
-        accumulate overflow.
+        A genuine wrap decreases the value by ~2^32; a smaller backward step
+        means a reboot, and a long silent gap may hide one or more wraps —
+        both re-anchor instead of shifting time.
         """
         local_ts = int(fields["local_timestamp"])
+        now = time.time()
 
-        # Detect 32-bit wraparound
+        # A pause longer than the 32-bit counter period means we cannot know
+        # how many wraps were missed; start a fresh anchor.
+        if (
+            self._last_counter_at is not None
+            and now - self._last_counter_at > 4000.0
+        ):
+            logger.info("CSI counter gap > 4000 s — re-anchoring timestamps")
+            self._reset_timestamps()
+        self._last_counter_at = now
+
         if self._prev_local_ts is not None:
-            if local_ts < self._prev_local_ts - (2 ** 31):
+            decrease = self._prev_local_ts - local_ts
+            if decrease > (2 ** 31):
+                # Genuine 32-bit wrap (decrease ≈ 2^32 µs).
                 self._ts_overflow += 2 ** 32
                 logger.debug(
                     "local_timestamp wrap detected (prev=%d, cur=%d, overflow=%d)",
                     self._prev_local_ts, local_ts, self._ts_overflow,
                 )
+            elif decrease > 1_000_000:
+                # Counter moved backwards by > 1 s without wrapping: the
+                # device rebooted. Re-anchor rather than shifting time.
+                logger.info(
+                    "CSI counter reset detected (prev=%d, cur=%d) — "
+                    "re-anchoring timestamps",
+                    self._prev_local_ts, local_ts,
+                )
+                self._offset_time = None
+                self._ts_overflow = 0
+                self._prev_local_ts = None
         self._prev_local_ts = local_ts
 
         adjusted = local_ts + self._ts_overflow
@@ -591,9 +681,37 @@ class CsiMqttReader:
         # Establish baseline on first valid packet of this session
         if self._offset_time is None:
             self._offset_time = adjusted
-            self._unix_start_time = time.time()
+            self._unix_start_time = now
 
         return self._unix_start_time + (adjusted - self._offset_time) / 1_000_000.0
+
+    def _note_timestamp_correction(
+        self, kind: str, raw: float | None, used: float
+    ) -> None:
+        """Record a host-clock substitution and log it at a sane rate."""
+        self.status.update(
+            timestamps_corrected=self.status.timestamps_corrected + 1,
+            last_timestamp_correction_at=used,
+        )
+
+        now_mono = time.monotonic()
+        if (
+            self._last_correction_log_at is not None
+            and now_mono - self._last_correction_log_at < 30.0
+        ):
+            return
+        self._last_correction_log_at = now_mono
+
+        receiver_note = (
+            " (receiver reports ntp_synced=true)"
+            if self.status.ntp_synced else ""
+        )
+        logger.info(
+            "Timestamp corrected from host clock (%s): firmware=%r -> %.6f%s "
+            "[total=%d]",
+            kind, raw, used, receiver_note,
+            self.status.timestamps_corrected,
+        )
 
     def _safe_enqueue(self, record: CSIRecord) -> None:
         """Enqueue a record, dropping oldest if the queue is full.
@@ -613,8 +731,9 @@ class CsiMqttReader:
             pass
 
     def _reset_timestamps(self) -> None:
-        """Reset timestamp tracking state (called on each new connection)."""
+        """Reset the counter anchor (new connection or detected reboot)."""
         self._unix_start_time = 0.0
         self._offset_time = None
         self._prev_local_ts = None
         self._ts_overflow = 0
+        self._last_counter_at = None

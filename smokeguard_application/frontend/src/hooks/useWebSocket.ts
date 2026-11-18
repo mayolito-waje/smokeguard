@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { WsMessage } from '../types';
+import type { WsMessage, WsStatus } from '../types';
 import {
   pushFrame,
   startMetricsPoll,
@@ -35,6 +35,8 @@ export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'closed';
 export interface UseWsResult {
   state: ConnState;
   reconnect: () => void;
+  /** Latest status message (MQTT, receiver, internet/NTP, corrections). */
+  status: WsStatus | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,7 @@ export interface UseWsResult {
 
 export function useWebSocket(): UseWsResult {
   const [state, setState] = useState<ConnState>('connecting');
+  const [status, setStatus] = useState<WsStatus | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const backoffRef = useRef(1000);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -77,6 +80,7 @@ export function useWebSocket(): UseWsResult {
         if (msg.type === 'csi') pushFrame(msg);
         else if (msg.type === 'smoke') pushSmokeSample(msg);
         else if (msg.type === 'alert') pushAlert(msg);
+        else if (msg.type === 'status') setStatus(msg);
       } catch { /* ignore malformed */ }
     };
 
@@ -124,5 +128,5 @@ export function useWebSocket(): UseWsResult {
     };
   }, [connect, clearTimers]);
 
-  return { state, reconnect };
+  return { state, reconnect, status };
 }

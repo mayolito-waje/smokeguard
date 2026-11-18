@@ -71,11 +71,15 @@ injected into the containers wholesale, and the internal addresses
 | `MQTT_TOPIC_DATA` | `home/csi/data` | CSI CSV stream |
 | `MQTT_TOPIC_STATUS` | `home/csi/status` | Receiver status JSON |
 | `MQTT_TOPIC_SMOKE` | `home/smoke_sensor/data` | Air-quality CSV stream |
+| `NTP_SERVERS` | `pool.ntp.org,time.google.com,time.cloudflare.com` | Backend internet/NTP probe servers (comma-separated) |
+| `NTP_TIMEOUT_S` | `1.0` | Per-server probe timeout |
+| `NTP_RECHECK_INTERVAL_S` | `300` | Probe refresh interval; `0` = startup + manual refresh only |
+| `TIMESTAMP_MAX_SKEW_S` | `300` | Live timestamp validity window; implausible values are host-corrected |
 | `INFLUXDB_ADMIN_USER` / `INFLUXDB_ADMIN_PASSWORD` | `admin` / `smokeguard-admin` | InfluxDB UI login |
 | `INFLUXDB_TOKEN` | `dev-influx-token-change-me` | Shared by InfluxDB init and the backend |
 | `INFLUXDB_ORG` / `INFLUXDB_BUCKET` | `smokeguard` / `csi_data` | InfluxDB organization/bucket |
 | `JWT_SECRET` / `PASSWORD_RESET_SECRET` | development values | Login token signing / password reset |
-| `TZ` | `Asia/Manila` | Month grouping and PDF report timestamps |
+| `TZ` | `Asia/Manila` | Local display, month grouping, and PDF timestamps (record times stay UTC epoch) |
 | `REPORT_FACILITY` | `DLSU-D PBH320` | Facility name printed in PDF reports |
 
 Notes:
@@ -90,6 +94,17 @@ Notes:
   deleting the InfluxDB volume (see below).
 - Host port overrides are for debugging only. Devices must use the published
   `MQTT_PORT`.
+- The backend's internet/NTP probe uses outbound **UDP 123** from the container.
+  Docker bridge NAT normally permits it. If UDP 123 is blocked, the dashboard
+  badge reports a connection error, but MQTT ingestion and host-clock timestamp
+  correction keep working — the probe is advisory.
+- The **Model Info** tab is built from the static
+  `frontend/src/data/modelInfo.ts` snapshot, so it needs no Compose variables;
+  update that module after retraining.
+- When running `scripts/mockup_detection_event.py` against the Compose stack,
+  set `TIMESTAMP_MAX_SKEW_S=3600` in `.env` and recreate the backend: the
+  mockup's clean-air baseline is intentionally backdated 600 s, while the
+  default ±300 s window would correct it to receive time.
 
 ## Data and persistence
 
@@ -129,6 +144,11 @@ Export InfluxDB data separately if you need the old CSI/smoke readings.
   path needs it; at least 300 buffered CSI packets).
 - **History**: pick a month, filter by detection class, open an event, or download
   the monthly **PDF report** (all classes).
+- **Model Info**: a read-only metrics reference — CSI 7-class and binary
+  results, the sensor SVM holdout, simulated late-fusion results, confusion
+  matrices, per-class tables, and plain-language metric definitions. The values
+  are a static snapshot from the training notebooks and model sidecars
+  (`frontend/src/data/modelInfo.ts`); fusion is explicitly labelled simulated.
 - Detection and both scores need a stream of air-quality samples on
   `home/smoke_sensor/data` — see the [hardware README](../README.md#smoke-sensor-data).
   Without that stream the dashboard still shows CSI, but the detection pipeline

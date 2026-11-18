@@ -40,6 +40,8 @@ export interface SubcarrierMetadata {
   subcarrier_wrap_idx: number;
 }
 
+export type InternetNtpState = 'online' | 'offline' | 'checking' | 'unknown';
+
 export interface WsStatus {
   type: 'status';
   mqtt: 'connected' | 'disconnected' | 'reconnecting';
@@ -48,7 +50,26 @@ export interface WsStatus {
   last_record_at: number | null;
   error: string | null;
   receiver_online?: boolean | null;
+  /** Receiver-reported SNTP state, not the backend's internet probe. */
   ntp_synced?: boolean | null;
+  internet_ntp_state?: InternetNtpState;
+  internet_ntp_server?: string | null;
+  internet_ntp_offset_s?: number | null;
+  internet_ntp_rtt_s?: number | null;
+  internet_ntp_last_checked_at?: number | null;
+  internet_ntp_error?: string | null;
+  timestamps_corrected?: number;
+  last_timestamp_correction_at?: number | null;
+}
+
+/** POST /api/ntp/check response. */
+export interface NtpStatusResponse {
+  internet_ntp_state: InternetNtpState;
+  internet_ntp_server: string | null;
+  internet_ntp_offset_s: number | null;
+  internet_ntp_rtt_s: number | null;
+  internet_ntp_last_checked_at: number | null;
+  internet_ntp_error: string | null;
 }
 
 export interface SmokeSample {

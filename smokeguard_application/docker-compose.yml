@@ -96,6 +96,16 @@ services:
       MQTT_TOPIC_DATA: ${MQTT_TOPIC_DATA:-home/csi/data}
       MQTT_TOPIC_STATUS: ${MQTT_TOPIC_STATUS:-home/csi/status}
       MQTT_TOPIC_SMOKE: ${MQTT_TOPIC_SMOKE:-home/smoke_sensor/data}
+      # Application-level internet/NTP probe (dashboard badge + refresh).
+      # Raw UDP to port 123; Docker's default bridge NAT normally permits it.
+      # If UDP 123 is blocked, the badge reports offline while ingestion and
+      # host-clock timestamp correction keep working — the probe is advisory.
+      NTP_SERVERS: ${NTP_SERVERS:-pool.ntp.org,time.google.com,time.cloudflare.com}
+      NTP_TIMEOUT_S: ${NTP_TIMEOUT_S:-1.0}
+      NTP_RECHECK_INTERVAL_S: ${NTP_RECHECK_INTERVAL_S:-300}
+      # Live CSI/smoke rows farther than this from the host clock are replaced
+      # by a host-clock estimate (±5 minutes by default). CSV replay is exempt.
+      TIMESTAMP_MAX_SKEW_S: ${TIMESTAMP_MAX_SKEW_S:-300}
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-dev-influx-token-change-me}
       INFLUXDB_ORG: ${INFLUXDB_ORG:-smokeguard}
