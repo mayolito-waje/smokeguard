@@ -1,12 +1,17 @@
 /**
  * Model Info page data — a static snapshot of the training/evaluation results.
  *
- * Sources (extracted 2026-11-18):
- * - ../notebooks/SmokeGuard_v2.ipynb — CSI 7-class ResNet-LSTM
- * - ../notebooks/SmokeGuard_Smoke_Sensor.ipynb — air-quality SVM
- * - ../notebooks/SmokeGuard_Fusion.ipynb — late-fusion policy + simulation
- * - models/csi_resnet_lstm_7class.platt.json — CSI calibration diagnostics
- * - models/smoke_svm.meta.json — sensor holdout/OOF/CV metrics
+ * Sources (extracted 2026-11-18), at these paths in the GitHub repository:
+ * - notebooks/SmokeGuard_v2.ipynb — CSI 7-class ResNet-LSTM
+ * - notebooks/SmokeGuard_Smoke_Sensor.ipynb — air-quality SVM
+ * - notebooks/SmokeGuard_Fusion.ipynb — late-fusion policy + simulation
+ * - smokeguard_application/models/csi_resnet_lstm_7class.platt.json — CSI
+ *   calibration diagnostics
+ * - smokeguard_application/models/smoke_svm.meta.json — sensor
+ *   holdout/OOF/CV metrics
+ * - smokeguard_application/app/config.py — deployed thresholds/weights
+ *
+ * The Provenance section links these paths on the repository's `main` branch.
  *
  * Nothing here is fetched at runtime. Re-extract these values and bump
  * SNAPSHOT_DATE whenever a model is retrained. Components format numbers;
@@ -96,7 +101,17 @@ export interface MetricGroup {
   items: readonly MetricDefinition[];
 }
 
+export type FaqCategoryId = 'metrics' | 'fusion' | 'limits';
+
+export interface FaqCategory {
+  id: FaqCategoryId;
+  title: string;
+}
+
 export interface FaqItem {
+  /** Stable slug: React key and open-state key. */
+  id: string;
+  category: FaqCategoryId;
   question: string;
   answer: string;
 }
@@ -518,53 +533,79 @@ export const METRIC_GROUPS: readonly MetricGroup[] = [
 // FAQ
 // ---------------------------------------------------------------------------
 
+export const FAQ_CATEGORIES: readonly FaqCategory[] = [
+  { id: 'metrics', title: 'Metrics & calibration' },
+  { id: 'fusion', title: 'Fusion & alerts' },
+  { id: 'limits', title: 'Limits & provenance' },
+];
+
 export const FAQ_ITEMS: readonly FaqItem[] = [
   {
+    id: 'single-accuracy',
+    category: 'metrics',
     question: 'Why is there no single accuracy number?',
     answer:
       'The three parts are evaluated on different data and units: CSI on 224 test windows, the sensor on 108 held-out intervals, and fusion on 24,192 artificial CSI × sensor pairs. Their percentages answer different questions and are not directly comparable.',
   },
   {
+    id: 'fusion-tpr-provenance',
+    category: 'fusion',
     question: 'Is the 75% fusion TPR real paired data?',
     answer:
       'No. No synchronized CSI + sensor test recording exists. The fusion evaluation pairs every CSI test window with every sensor test interval (224 × 108 = 24,192 artificial pairs). TPR, FPR, Youden J, and the per-class rates are the interpretable results. Precision, F1, and accuracy depend on the artificial 4.6% positive prevalence.',
   },
   {
+    id: 'product-alert-rate',
+    category: 'fusion',
     question: 'Does the product alert at the fusion rate?',
     answer:
       'No. The paper tables count only confirmed fusion alerts. The deployed app also emits smoke_only when the sensor gate passes but the CSI/fusion gates do not, so the product’s total alert sensitivity is higher (with more false alarms) than the fusion-only TPR shown here.',
   },
   {
+    id: 'sensor-perfect-scores',
+    category: 'metrics',
     question: 'Why are the sensor recall and AUC 1.0?',
     answer:
       'The sensor test set is one held-out recording with 73 no-smoke and 35 smoke intervals, and the classes are cleanly separable there. That is a strong cross-recording result, not proof of perfect performance in every room. Balanced accuracy (98.6%) and smoke F1 (97.2%) are the safer summaries.',
   },
   {
+    id: 'binary-vs-seven-class',
+    category: 'metrics',
     question: 'Why is binary CSI 93.8% but 7-class CSI 86.2%?',
     answer:
       'They answer different questions. The binary view merges six non-smoke activities into one negative class, which is an easier task. Its 0.326 cut-off was chosen from the test score distribution, so it is descriptive and not a deployed, fully held-out gate.',
   },
   {
+    id: 'unseen-session',
+    category: 'limits',
     question: 'Why does the unseen session score only 30.6%?',
     answer:
       'That recording came from a new environment and was never used for training or tuning. The 7-class accuracy collapses, although smoke recall stays at 74% and the binary smoke AUC is 0.816. It is a domain-shift warning, not the headline in-domain result.',
   },
   {
+    id: 'fusion-weights',
+    category: 'fusion',
     question: 'Why 50/50 fusion weights?',
     answer:
       'Equal weights require real CSI evidence before a fusion alert and limit sensor-only false alarms. A sweep toward sensor-heavy weights raises simulated TPR (0.781 at 0.3/0.7) but also raises FPR and lets the sensor carry weak CSI cases; 50/50 is a deliberate safety choice.',
   },
   {
+    id: 'platt-calibration',
+    category: 'metrics',
     question: 'Why use Platt calibration if raw accuracy is higher?',
     answer:
       'The fused score needs comparable probabilities, and calibration improves probability quality (test Brier 0.213 → 0.199, log loss 0.451 → 0.443). It does not improve every metric: calibrated test accuracy drops slightly (86.2% → 85.7%), and ECE (0.045 → 0.064) is worse on test. Validation fitted the calibrator; test is diagnostics-only.',
   },
   {
+    id: 'static-snapshot',
+    category: 'limits',
     question: 'Are these numbers live?',
     answer:
       'No. They are a static snapshot extracted from the training notebooks and model sidecar JSONs. The live app uses the checkpoints in models/; update frontend/src/data/modelInfo.ts after retraining.',
   },
   {
+    id: 'smoke-only',
+    category: 'fusion',
     question: 'What is smoke_only?',
     answer:
       'A product extension: the sensor gate passes but CSI does not confirm the gesture (or the fused score is below 0.70). It is labelled “possible smoking activity” and is weaker than a confirmed fusion alert. The experimental csi_only class is off by default.',
@@ -575,32 +616,46 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
 // Provenance
 // ---------------------------------------------------------------------------
 
-export const PROVENANCE = [
+export interface ProvenanceItem {
+  /** Compact visible label. */
+  source: string;
+  /** Repository-relative path; rendered as a GitHub link. */
+  path: string;
+  detail: string;
+}
+
+export const PROVENANCE: readonly ProvenanceItem[] = [
   {
     source: 'SmokeGuard_v2.ipynb',
+    path: 'notebooks/SmokeGuard_v2.ipynb',
     detail:
       'CSI 7-class training and evaluation: split metadata, raw/calibrated test metrics and confusion matrices, binary smoke view, unseen-session check.',
   },
   {
     source: 'SmokeGuard_Smoke_Sensor.ipynb',
+    path: 'notebooks/SmokeGuard_Smoke_Sensor.ipynb',
     detail:
       'Sensor SVM training, grouped out-of-fold threshold selection, cross-validation, and the file-holdout evaluation.',
   },
   {
     source: 'SmokeGuard_Fusion.ipynb',
+    path: 'notebooks/SmokeGuard_Fusion.ipynb',
     detail:
       'Deployed fusion policy and the simulated cross-product evaluation (no paired CSI + sensor test set).',
   },
   {
     source: 'models/csi_resnet_lstm_7class.platt.json',
+    path: 'smokeguard_application/models/csi_resnet_lstm_7class.platt.json',
     detail: 'CSI validation/test calibration diagnostics and class order (2026-10-30).',
   },
   {
     source: 'models/smoke_svm.meta.json',
+    path: 'smokeguard_application/models/smoke_svm.meta.json',
     detail: 'Sensor holdout/OOF/CV metrics, threshold, and feature contract (2026-11-08).',
   },
   {
     source: 'app/config.py',
+    path: 'smokeguard_application/app/config.py',
     detail: 'Deployed sensor gate, fused threshold, and fusion weights.',
   },
 ];

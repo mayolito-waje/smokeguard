@@ -14,6 +14,8 @@
   --ink2:           #4a5568;
   --ink3:           #8899a6;
   --accent:         #059669;
+  /* Text-safe link colour: --accent is only ~3.8:1 on white. */
+  --link:           #047857;
   --accent-dim:     #d1fae5;
   --accent-glow:    rgba(5, 150, 105, 0.15);
   --ok:             #059669;
@@ -41,6 +43,7 @@
   --ink2:           #a0a0a0;
   --ink3:           #666666;
   --accent:         #10b981;
+  --link:           #10b981;
   --accent-dim:     #064e3b;
   --accent-glow:    rgba(16, 185, 129, 0.12);
   --ok:             #10b981;
@@ -73,6 +76,19 @@ body,
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Visible to assistive tech, not to sighted users. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ---- App layout ---- */
@@ -1854,8 +1870,7 @@ body,
   border-top: 1px solid var(--border);
 }
 
-.model-details > summary,
-.model-faq-item > summary {
+.model-details > summary {
   padding: 2px 0;
   cursor: pointer;
   font-size: 12px;
@@ -1863,13 +1878,11 @@ body,
   color: var(--ink2);
 }
 
-.model-details > summary:hover,
-.model-faq-item > summary:hover {
+.model-details > summary:hover {
   color: var(--ink);
 }
 
-.model-details > summary:focus-visible,
-.model-faq-item > summary:focus-visible {
+.model-details > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1888,30 +1901,186 @@ body,
   color: var(--ink2);
 }
 
+.model-faq-intro {
+  max-width: 70ch;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink2);
+}
+
+.model-faq-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.model-faq-hint {
+  font-size: 11.5px;
+  color: var(--ink2);
+}
+
+.model-faq-toggle-all {
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+
+.model-faq-toggle-all:hover {
+  background: var(--bg-hover);
+}
+
+.model-faq-toggle-all:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.model-faq-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.model-faq-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-faq-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.model-faq-group-count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--ink2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+}
+
 .model-faq {
   display: flex;
   flex-direction: column;
+  gap: 8px;
 }
 
 .model-faq-item {
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  transition: border-color 150ms, background 150ms;
 }
 
-.model-faq-item:last-child {
-  border-bottom: none;
+.model-faq-item:hover {
+  border-color: var(--border-strong);
+}
+
+.model-faq-item[open] {
+  border-color: var(--accent);
 }
 
 .model-faq-item > summary {
-  padding: 9px 2px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: var(--ink2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
 }
 
-.model-faq-item > p {
-  max-width: 900px;
-  margin: 0 0 10px;
-  padding: 0 2px;
-  font-size: 11px;
-  line-height: 1.6;
+.model-faq-item[open] > summary {
+  border-radius: 9px 9px 0 0;
+}
+
+.model-faq-item > summary::-webkit-details-marker {
+  display: none;
+}
+
+.model-faq-item > summary:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.model-faq-item > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.model-faq-question {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.model-faq-index {
+  flex: none;
+  min-width: 24px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-hover);
   color: var(--ink2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.model-faq-chevron {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--ink2);
+  border-bottom: 1.5px solid var(--ink2);
+  transform: rotate(45deg);
+  transition: transform 160ms, border-color 160ms;
+}
+
+.model-faq-item[open] .model-faq-chevron {
+  border-color: var(--ink);
+  transform: rotate(225deg);
+}
+
+.model-faq-answer {
+  padding: 10px 14px 13px 46px;
+  border-top: 1px solid var(--border);
+}
+
+.model-faq-answer p {
+  max-width: 70ch;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-faq-item,
+  .model-faq-chevron {
+    transition: none;
+  }
 }
 
 /* ---- Glossary ---- */
@@ -1972,19 +2141,60 @@ body,
 
 .model-provenance-item {
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr);
-  gap: 12px;
-  font-size: 11px;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: 4px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  font-size: 12px;
 }
 
 .model-provenance-item dt {
+  min-width: 0;
   font-family: var(--font-mono);
-  color: var(--ink);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .model-provenance-item dd {
   margin: 0;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink2);
+}
+
+.model-provenance-link {
+  border-radius: 2px;
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  transition: color 150ms, text-decoration-thickness 150ms;
+}
+
+.model-provenance-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.model-provenance-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.model-ext {
+  margin-left: 3px;
+  font-size: 0.9em;
+}
+
+.model-provenance-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
   color: var(--ink2);
 }
 
@@ -2157,7 +2367,7 @@ body,
   }
   .model-provenance-item {
     grid-template-columns: 1fr;
-    gap: 2px;
+    gap: 4px;
   }
   /* The third header tab can exhaust a narrow viewport; let the header and
      its right-hand controls wrap instead of clipping. */
@@ -2184,11 +2394,30 @@ body,
 }
 
 @media (max-width: 560px) {
+  .model-view {
+    padding: 16px 14px;
+  }
   .model-tiles,
   .model-facts {
     grid-template-columns: 1fr;
   }
   .model-title {
     font-size: 18px;
+  }
+  .model-faq-toolbar {
+    align-items: flex-start;
+  }
+  .model-faq-item > summary {
+    padding: 9px 10px;
+    gap: 8px;
+  }
+  .model-faq-answer {
+    padding: 9px 12px 12px;
+  }
+  .model-provenance-item {
+    padding: 9px 10px;
+  }
+  .model-provenance-item dt {
+    font-size: 11px;
   }
 }

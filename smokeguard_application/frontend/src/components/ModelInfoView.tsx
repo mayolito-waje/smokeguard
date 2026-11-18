@@ -5,8 +5,10 @@
  * lays them out; it never fetches metrics at runtime.
  */
 
-import type { ReactNode } from 'react';
+import { useState } from 'react';
+import type { ReactNode, SyntheticEvent } from 'react';
 import ConfusionMatrix from './ConfusionMatrix';
+import { GITHUB_REPO, githubBlobUrl } from '../github';
 import {
   CSI_BINARY_TEST,
   CSI_MODEL,
@@ -14,6 +16,7 @@ import {
   CSI_TEST_RAW,
   CSI_UNSEEN,
   CSI_VALIDATION_ROWS,
+  FAQ_CATEGORIES,
   FAQ_ITEMS,
   FUSION,
   METRIC_GROUPS,
@@ -161,6 +164,104 @@ function Glossary({ groups }: { groups: readonly MetricGroup[] }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FAQ
+// ---------------------------------------------------------------------------
+
+function FaqSection() {
+  const [openIds, setOpenIds] = useState<ReadonlySet<string>>(() => new Set());
+  const allOpen = FAQ_ITEMS.every((item) => openIds.has(item.id));
+
+  const setAll = (open: boolean) => {
+    setOpenIds(open ? new Set(FAQ_ITEMS.map((item) => item.id)) : new Set());
+  };
+
+  const handleToggle =
+    (id: string) => (event: SyntheticEvent<HTMLDetailsElement>) => {
+      const isOpen = event.currentTarget.open;
+      setOpenIds((prev) => {
+        // Programmatic open changes also emit toggle events; ignore those
+        // instead of recreating the set on every expand-all.
+        if (prev.has(id) === isOpen) return prev;
+        const next = new Set(prev);
+        if (isOpen) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+    };
+
+  return (
+    <Section title="Frequently asked questions">
+      <p className="model-faq-intro">
+        Short answers to the questions the metrics raise.
+      </p>
+      <div className="model-faq-toolbar">
+        <span className="model-faq-hint">
+          {FAQ_ITEMS.length} answers · select a question to expand
+        </span>
+        <button
+          type="button"
+          className="model-faq-toggle-all"
+          aria-controls="model-faq-groups"
+          aria-label={
+            allOpen ? 'Collapse all FAQ answers' : 'Expand all FAQ answers'
+          }
+          onClick={() => setAll(!allOpen)}
+        >
+          {allOpen ? 'Collapse all' : 'Expand all'}
+        </button>
+      </div>
+      <div id="model-faq-groups" className="model-faq-groups">
+        {FAQ_CATEGORIES.map((group) => {
+          const items = FAQ_ITEMS.filter(
+            (item) => item.category === group.id,
+          );
+          return (
+            <section
+              key={group.id}
+              className="model-faq-group"
+              aria-labelledby={`faq-group-${group.id}`}
+            >
+              <h4
+                id={`faq-group-${group.id}`}
+                className="model-faq-group-title"
+              >
+                {group.title}
+                <span className="model-faq-group-count" aria-hidden="true">
+                  {items.length}
+                </span>
+              </h4>
+              <div className="model-faq">
+                {items.map((item, index) => (
+                  <details
+                    key={item.id}
+                    className="model-faq-item"
+                    open={openIds.has(item.id)}
+                    onToggle={handleToggle(item.id)}
+                  >
+                    <summary>
+                      <span className="model-faq-index" aria-hidden="true">
+                        Q{index + 1}
+                      </span>
+                      <span className="model-faq-question">
+                        {item.question}
+                      </span>
+                      <span className="model-faq-chevron" aria-hidden="true" />
+                    </summary>
+                    <div className="model-faq-answer">
+                      <p>{item.answer}</p>
+                    </div>
+                  </details>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </Section>
   );
 }
 
@@ -773,27 +874,53 @@ export default function ModelInfoView() {
         </Section>
 
         {/* ---------------- FAQ ---------------- */}
-        <Section title="FAQ">
-          <div className="model-faq">
-            {FAQ_ITEMS.map((item) => (
-              <details key={item.question} className="model-faq-item">
-                <summary>{item.question}</summary>
-                <p>{item.answer}</p>
-              </details>
-            ))}
-          </div>
-        </Section>
+        <FaqSection />
 
         {/* ---------------- Provenance ---------------- */}
         <Section title="Provenance and scope">
           <dl className="model-provenance">
             {PROVENANCE.map((item) => (
-              <div key={item.source} className="model-provenance-item">
-                <dt>{item.source}</dt>
+              <div key={item.path} className="model-provenance-item">
+                <dt>
+                  <a
+                    className="model-provenance-link"
+                    href={githubBlobUrl(item.path)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {item.source}
+                    <span className="model-ext" aria-hidden="true">
+                      {' '}
+                      ↗
+                    </span>
+                    <span className="visually-hidden">
+                      {' '}
+                      (opens in a new tab)
+                    </span>
+                  </a>
+                </dt>
                 <dd>{item.detail}</dd>
               </div>
             ))}
           </dl>
+          <p className="model-provenance-footer">
+            <a
+              className="model-provenance-link"
+              href={GITHUB_REPO}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View repository on GitHub
+              <span className="model-ext" aria-hidden="true">
+                {' '}
+                ↗
+              </span>
+              <span className="visually-hidden"> (opens in a new tab)</span>
+            </a>
+            <span>
+              Source links open the <code>main</code> branch in a new tab.
+            </span>
+          </p>
           <p className="model-note">
             Static snapshot {SNAPSHOT_DATE}. These values are not fetched at
             runtime. After retraining, re-extract them from the notebooks and
