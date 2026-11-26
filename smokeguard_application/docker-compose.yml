@@ -115,7 +115,6 @@ services:
       DETECTION_DB_PATH: /data/detection.db
       AUTH_DB_PATH: /data/auth.db
       TZ: ${TZ:-Asia/Manila}
-      REPORT_FACILITY: ${REPORT_FACILITY:-DLSU-D PBH320}
     healthcheck:
       test:
         - CMD

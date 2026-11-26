@@ -41,15 +41,14 @@ _SOURCE_TEXT = {
 
 # (heading, width in mm, alignment)
 _COLUMNS = (
-    ("Date", 27, "L"),
-    ("Time", 18, "L"),
-    ("Facility", 36, "L"),
-    ("Detection Source", 44, "L"),
-    ("Wi-Fi CSI\nScore", 29, "C"),
-    ("Air Quality\nScore", 29, "C"),
-    ("Fusion\nScore", 25, "C"),
-    ("Avg PM2.5\n(µg/m³)", 24, "C"),
-    ("Smoking Activity\nProbability", 35, "C"),
+    ("Date", 32, "L"),
+    ("Time", 22, "L"),
+    ("Detection Source", 52, "L"),
+    ("Wi-Fi CSI\nScore", 33, "C"),
+    ("Air Quality\nScore", 33, "C"),
+    ("Fusion\nScore", 29, "C"),
+    ("Avg PM2.5\n(µg/m³)", 27, "C"),
+    ("Smoking Activity\nProbability", 39, "C"),
 )
 _TABLE_WIDTH = sum(width for _, width, _ in _COLUMNS)
 _HEADER_H = 11.0
@@ -119,13 +118,11 @@ class _MonthlyReport(FPDF):
         self,
         *,
         period: str,
-        facility: str,
         generated: str,
         logo_path: str | None,
     ) -> None:
         super().__init__(orientation="L", unit="mm", format="A4")
         self.period = period
-        self.facility = facility
         self.generated = generated
         self.logo_path = logo_path
         self._logo_warned = False
@@ -282,7 +279,6 @@ class _MonthlyReport(FPDF):
         cells = (
             (detected.strftime("%b %d, %Y"), None, None, False),
             (detected.strftime("%H:%M"), None, None, False),
-            (self.facility, None, None, False),
             (_SOURCE_TEXT.get(label, label), None, None, False),
             (_fmt_pct(event.get("p_csi")), csi_fill,
              AMBER_TEXT if csi_fill else None, False),
@@ -298,7 +294,7 @@ class _MonthlyReport(FPDF):
         x = self.l_margin
         base_fill = ROW_ALT if index % 2 else WHITE
         for (text, width, align), (value, fill, text_color, bold) in zip(
-            _COLUMNS, cells
+            _COLUMNS, cells, strict=True
         ):
             self.set_xy(x, y)
             self.set_fill_color(*(fill or base_fill))
@@ -388,7 +384,6 @@ def build_monthly_report_pdf(
     events: list[dict],
     sensor_prob_threshold: float,
     fusion_score_threshold: float,
-    facility: str,
     logo_path: str | None,
     generated_at: datetime | None = None,
 ) -> bytes:
@@ -397,7 +392,6 @@ def build_monthly_report_pdf(
     period = datetime(year, month, 1).strftime("%B %Y")
     pdf = _MonthlyReport(
         period=period,
-        facility=facility,
         generated=generated.strftime("%b %d, %Y %H:%M"),
         logo_path=logo_path,
     )

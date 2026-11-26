@@ -174,7 +174,6 @@ def download_monthly_report(
             events=events,
             sensor_prob_threshold=settings.sensor_prob_threshold,
             fusion_score_threshold=settings.fusion_score_threshold,
-            facility=settings.report_facility,
             logo_path=settings.report_logo_path,
         )
     except Exception as exc:

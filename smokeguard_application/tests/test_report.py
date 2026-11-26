@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from app.detection_store import DetectionStore
 from app.report import (
+    _COLUMNS,
+    _TABLE_WIDTH,
     _csi_hit,
     _fusion_hit,
     _sensor_hit,
@@ -119,7 +121,6 @@ def test_report_pdf_with_events_is_valid():
         events=events,
         sensor_prob_threshold=SENSOR_THRESHOLD,
         fusion_score_threshold=FUSION_THRESHOLD,
-        facility="DLSU-D PBH320",
         logo_path=None,
         generated_at=datetime(2026, 11, 17, 19, 45),
     )
@@ -134,11 +135,20 @@ def test_report_pdf_empty_month_is_valid():
         events=[],
         sensor_prob_threshold=SENSOR_THRESHOLD,
         fusion_score_threshold=FUSION_THRESHOLD,
-        facility="DLSU-D PBH320",
         logo_path=None,
     )
     assert pdf.startswith(b"%PDF-")
     assert len(pdf) > 1000
+
+
+def test_report_table_has_no_facility_column_and_keeps_full_width():
+    headings = [title for title, _, _ in _COLUMNS]
+    assert "Facility" not in headings
+    assert len(_COLUMNS) == 8
+    assert [width for _, width, _ in _COLUMNS] == [
+        32, 22, 52, 33, 33, 29, 27, 39,
+    ]
+    assert _TABLE_WIDTH == 267
 
 
 def test_report_pdf_embeds_the_logo_when_available():
@@ -150,7 +160,6 @@ def test_report_pdf_embeds_the_logo_when_available():
         events=[_event()],
         sensor_prob_threshold=SENSOR_THRESHOLD,
         fusion_score_threshold=FUSION_THRESHOLD,
-        facility="DLSU-D PBH320",
         logo_path=str(LOGO),
     )
     assert pdf.startswith(b"%PDF-")
@@ -289,7 +298,6 @@ def test_report_route_returns_a_pdf(tmp_path):
         app.state.settings = SimpleNamespace(
             sensor_prob_threshold=SENSOR_THRESHOLD,
             fusion_score_threshold=FUSION_THRESHOLD,
-            report_facility="DLSU-D PBH320",
             report_logo_path=None,
         )
         with TestClient(app) as client:
