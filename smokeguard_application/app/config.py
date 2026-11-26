@@ -107,7 +107,6 @@ class Settings(BaseSettings):
     fusion_csi_weight: float = 0.50        # sensor weight = 1 - this
 
     # Monthly PDF report (Detection History -> Download PDF report).
-    report_facility: str = "DLSU-D PBH320"
     report_logo_path: str = "frontend/public/smokeguard_logo.png"
 
     # Admin auth (PoC).  The two secrets are independent and generated once

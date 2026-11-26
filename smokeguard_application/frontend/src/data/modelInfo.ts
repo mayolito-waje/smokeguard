@@ -1,7 +1,7 @@
 /**
  * Model Info page data — a static snapshot of the training/evaluation results.
  *
- * Sources (extracted 2026-11-18), at these paths in the GitHub repository:
+ * Sources (extracted 2026-11-26), at these paths in the GitHub repository:
  * - notebooks/SmokeGuard_v2.ipynb — CSI 7-class ResNet-LSTM
  * - notebooks/SmokeGuard_Smoke_Sensor.ipynb — air-quality SVM
  * - notebooks/SmokeGuard_Fusion.ipynb — late-fusion policy + simulation
@@ -18,7 +18,7 @@
  * they never own the metrics.
  */
 
-export const SNAPSHOT_DATE = '2026-11-18';
+export const SNAPSHOT_DATE = '2026-11-26';
 
 export const CSI_CLASSES = [
   'smoke',
@@ -133,29 +133,30 @@ export const CSI_MODEL = {
     { label: 'LSTM units', value: '96' },
     { label: 'Filters', value: '32 / 64 / 128' },
     { label: 'Window scan', value: '4.0–7.0 s' },
-    { label: 'Train / val / test', value: '1,628 / 224 / 224' },
-    { label: 'Trained', value: '2026-10-30' },
+    { label: 'Train / val / test', value: '2,067 / 279 / 279' },
+    { label: 'Best val macro-F1', value: '0.8293 @ epoch 135' },
+    { label: 'Trained', value: '2026-11-26' },
   ] satisfies readonly ModelFact[],
 } as const;
 
 const CSI_RAW_PER_CLASS: readonly PerClassMetric[] = [
-  { className: 'smoke', precision: 0.8333333, recall: 0.78125, f1: 0.8064516, support: 32 },
-  { className: 'eat', precision: 0.8285714, recall: 0.90625, f1: 0.8656716, support: 32 },
-  { className: 'drink', precision: 0.7241379, recall: 0.65625, f1: 0.6885246, support: 32 },
-  { className: 'sit', precision: 0.9393939, recall: 0.96875, f1: 0.9538462, support: 32 },
-  { className: 'stand', precision: 1.0, recall: 1.0, f1: 1.0, support: 32 },
-  { className: 'random', precision: 0.7428571, recall: 0.8125, f1: 0.7761194, support: 32 },
-  { className: 'static', precision: 0.9666667, recall: 0.90625, f1: 0.9354839, support: 32 },
+  { className: 'smoke', precision: 0.7419355, recall: 0.8070175, f1: 0.7731092, support: 57 },
+  { className: 'eat', precision: 0.7560976, recall: 0.8157895, f1: 0.7848101, support: 38 },
+  { className: 'drink', precision: 0.6666667, recall: 0.6315789, f1: 0.6486486, support: 38 },
+  { className: 'sit', precision: 0.8611111, recall: 0.8857143, f1: 0.8732394, support: 35 },
+  { className: 'stand', precision: 0.9166667, recall: 0.9428571, f1: 0.9295775, support: 35 },
+  { className: 'random', precision: 0.78125, recall: 0.6578947, f1: 0.7142857, support: 38 },
+  { className: 'static', precision: 0.9444444, recall: 0.8947368, f1: 0.9189189, support: 38 },
 ];
 
 const CSI_CALIBRATED_PER_CLASS: readonly PerClassMetric[] = [
-  { className: 'smoke', precision: 0.78125, recall: 0.78125, f1: 0.78125, support: 32 },
-  { className: 'eat', precision: 0.8055556, recall: 0.90625, f1: 0.8529412, support: 32 },
-  { className: 'drink', precision: 0.7407407, recall: 0.625, f1: 0.6779661, support: 32 },
-  { className: 'sit', precision: 0.96875, recall: 0.96875, f1: 0.96875, support: 32 },
-  { className: 'stand', precision: 1.0, recall: 1.0, f1: 1.0, support: 32 },
-  { className: 'random', precision: 0.7352941, recall: 0.78125, f1: 0.7575758, support: 32 },
-  { className: 'static', precision: 0.9677419, recall: 0.9375, f1: 0.952381, support: 32 },
+  { className: 'smoke', precision: 0.7301587, recall: 0.8070175, f1: 0.7666667, support: 57 },
+  { className: 'eat', precision: 0.7560976, recall: 0.8157895, f1: 0.7848101, support: 38 },
+  { className: 'drink', precision: 0.6571429, recall: 0.6052632, f1: 0.630137, support: 38 },
+  { className: 'sit', precision: 0.8611111, recall: 0.8857143, f1: 0.8732394, support: 35 },
+  { className: 'stand', precision: 0.9166667, recall: 0.9428571, f1: 0.9295775, support: 35 },
+  { className: 'random', precision: 0.8, recall: 0.6315789, f1: 0.7058824, support: 38 },
+  { className: 'static', precision: 0.9210526, recall: 0.9210526, f1: 0.9210526, support: 38 },
 ];
 
 // Rows = actual, columns = predicted, in CSI_CLASSES order.
@@ -163,13 +164,13 @@ const CSI_RAW_CONFUSION: ConfusionData = {
   rowLabels: CSI_CLASSES,
   colLabels: CSI_CLASSES,
   counts: [
-    [25, 0, 4, 0, 0, 3, 0],
-    [0, 29, 1, 1, 0, 1, 0],
-    [3, 5, 21, 0, 0, 3, 0],
-    [0, 0, 0, 31, 0, 1, 0],
-    [0, 0, 0, 0, 32, 0, 0],
-    [1, 1, 3, 0, 0, 26, 1],
-    [1, 0, 0, 1, 0, 1, 29],
+    [46, 3, 5, 1, 0, 1, 1],
+    [2, 31, 5, 0, 0, 0, 0],
+    [5, 6, 24, 1, 0, 2, 0],
+    [1, 0, 0, 31, 2, 1, 0],
+    [0, 0, 0, 2, 33, 0, 0],
+    [7, 1, 2, 1, 1, 25, 1],
+    [1, 0, 0, 0, 0, 3, 34],
   ],
 };
 
@@ -177,28 +178,28 @@ const CSI_CALIBRATED_CONFUSION: ConfusionData = {
   rowLabels: CSI_CLASSES,
   colLabels: CSI_CLASSES,
   counts: [
-    [25, 1, 3, 0, 0, 3, 0],
-    [0, 29, 1, 1, 0, 1, 0],
-    [4, 5, 20, 0, 0, 3, 0],
-    [0, 0, 0, 31, 0, 1, 0],
-    [0, 0, 0, 0, 32, 0, 0],
-    [2, 1, 3, 0, 0, 25, 1],
-    [1, 0, 0, 0, 0, 1, 30],
+    [46, 3, 5, 1, 0, 1, 1],
+    [2, 31, 5, 0, 0, 0, 0],
+    [6, 6, 23, 1, 0, 2, 0],
+    [1, 0, 0, 31, 2, 1, 0],
+    [0, 0, 0, 2, 33, 0, 0],
+    [7, 1, 2, 1, 1, 24, 2],
+    [1, 0, 0, 0, 0, 2, 35],
   ],
 };
 
 export const CSI_TEST_CALIBRATED: EvaluationView = {
   key: 'test-calibrated',
   label: 'Platt-calibrated argmax · held-out test',
-  split: 'Held-out test · 224 windows · 32 per class',
+  split: 'Held-out test · 279 windows · 57 / 38 / 38 / 35 / 35 / 38 / 38',
   summary: {
-    n: 224,
-    accuracy: 0.8571428571428571,
-    balancedAccuracy: 0.8571428571428571,
-    macroF1: 0.8558377125888877,
-    brier: 0.19917111691459796,
-    ece: 0.06438588440976434,
-    logLoss: 0.4433859671845802,
+    n: 279,
+    accuracy: 0.7992831541218638,
+    balancedAccuracy: 0.8013247404224847,
+    macroF1: 0.8016236664969841,
+    brier: 0.2867517364095143,
+    ece: 0.09769516781639975,
+    logLoss: 0.6083009745883816,
   },
   perClass: CSI_CALIBRATED_PER_CLASS,
   confusion: CSI_CALIBRATED_CONFUSION,
@@ -207,15 +208,15 @@ export const CSI_TEST_CALIBRATED: EvaluationView = {
 export const CSI_TEST_RAW: EvaluationView = {
   key: 'test-raw',
   label: 'Raw softmax argmax · held-out test (notebook headline)',
-  split: 'Held-out test · 224 windows · 32 per class',
+  split: 'Held-out test · 279 windows · 57 / 38 / 38 / 35 / 35 / 38 / 38',
   summary: {
-    n: 224,
-    accuracy: 0.8616071428571429,
-    balancedAccuracy: 0.8616071428571429,
-    macroF1: 0.860871038951025,
-    brier: 0.21302612799278758,
-    ece: 0.04547590176974018,
-    logLoss: 0.4506044216714746,
+    n: 279,
+    accuracy: 0.8028673835125448,
+    balancedAccuracy: 0.8050841389187253,
+    macroF1: 0.8060842219344986,
+    brier: 0.2959814199532609,
+    ece: 0.09023616850162486,
+    logLoss: 0.6172807271131416,
   },
   perClass: CSI_RAW_PER_CLASS,
   confusion: CSI_RAW_CONFUSION,
@@ -223,30 +224,30 @@ export const CSI_TEST_RAW: EvaluationView = {
 
 /** Validation aggregate rows only — no validation per-class table/matrix exists. */
 export const CSI_VALIDATION_ROWS: readonly ValidationRow[] = [
-  { key: 'val-raw', label: 'Validation · raw softmax', n: 224, accuracy: 0.8883928571428571, macroF1: 0.890622149589541 },
-  { key: 'val-cal', label: 'Validation · Platt-calibrated', n: 224, accuracy: 0.875, macroF1: 0.8753800506968712 },
+  { key: 'val-raw', label: 'Validation · raw softmax', n: 279, accuracy: 0.8207885304659498, macroF1: 0.8292699133431028 },
+  { key: 'val-cal', label: 'Validation · Platt-calibrated', n: 279, accuracy: 0.8279569892473119, macroF1: 0.8358238165512848 },
 ];
 
 /** Binary smoke diagnostic at the notebook's session-quantile threshold. */
 export const CSI_BINARY_TEST = {
   label: 'Binary smoke view · held-out test',
-  threshold: 0.3259,
+  threshold: 0.602046012878418,
   metrics: {
-    n: 224,
-    accuracy: 0.9375,
-    balancedAccuracy: 0.8723958333,
-    precision: 0.78125,
-    recall: 0.78125,
-    f1: 0.78125,
-    rocAuc: 0.95263671875,
-    averagePrecision: 0.8334992164,
+    n: 279,
+    accuracy: 0.9139784946236559,
+    balancedAccuracy: 0.8677098150782361,
+    precision: 0.7894736842,
+    recall: 0.7894736842,
+    f1: 0.7894736842,
+    rocAuc: 0.9480796586059744,
+    averagePrecision: 0.8500116025870696,
   } satisfies BinaryMetrics,
   confusion: {
     rowLabels: ['no-smoke', 'smoke'],
     colLabels: ['no-smoke', 'smoke'],
     counts: [
-      [185, 7],
-      [7, 25],
+      [210, 12],
+      [12, 45],
     ],
   } satisfies ConfusionData,
 };
@@ -256,28 +257,28 @@ export const CSI_UNSEEN = {
   label: 'Unseen session 2026-10-31',
   metrics: {
     n: 350,
-    accuracy: 0.3057,
-    balancedAccuracy: 0.3057,
-    macroF1: 0.2048,
+    accuracy: 0.3029,
+    balancedAccuracy: 0.3029,
+    macroF1: 0.1917,
   } satisfies SummaryMetrics,
-  smoke: { precision: 0.4353, recall: 0.74, f1: 0.5481 },
+  smoke: { precision: 0.2335, recall: 0.92, f1: 0.3725 },
   binary: {
     metrics: {
       n: 350,
-      accuracy: 0.8628571429,
-      balancedAccuracy: 0.72,
-      precision: 0.52,
-      recall: 0.52,
-      f1: 0.52,
-      rocAuc: 0.816,
-      averagePrecision: 0.5601,
+      accuracy: 0.7542857142857143,
+      balancedAccuracy: 0.59,
+      precision: 0.25,
+      recall: 0.36,
+      f1: 0.2951,
+      rocAuc: 0.7279,
+      averagePrecision: 0.2403,
     } satisfies BinaryMetrics,
     confusion: {
       rowLabels: ['no-smoke', 'smoke'],
       colLabels: ['no-smoke', 'smoke'],
       counts: [
-        [276, 24],
-        [24, 26],
+        [246, 54],
+        [32, 18],
       ],
     } satisfies ConfusionData,
   },
@@ -359,40 +360,40 @@ export const FUSION = {
     ],
   },
   simulation: {
-    csiWindows: 224,
+    csiWindows: 279,
     sensorIntervals: 108,
-    pairs: 24192,
-    positives: 1120,
-    negatives: 23072,
-    prevalence: 0.046296296296296294,
-    tp: 840,
-    fp: 175,
-    fn: 280,
-    tn: 22897,
-    tpr: 0.75,
-    fpr: 0.00758495145631068,
-    youdenJ: 0.7424150485436893,
-    precision: 0.8275862068965517,
-    recall: 0.75,
-    f1: 0.7868852459016394,
-    balancedAccuracy: 0.8712075242718447,
-    simulatedAccuracy: 0.9811921296,
+    pairs: 30132,
+    positives: 1995,
+    negatives: 28137,
+    prevalence: 0.06620868180007965,
+    tp: 1564,
+    fp: 515,
+    fn: 431,
+    tn: 27622,
+    tpr: 0.7839598997493734,
+    fpr: 0.01830330170238476,
+    youdenJ: 0.7656565980469886,
+    precision: 0.7522847522847523,
+    recall: 0.7839598997493734,
+    f1: 0.7677957781050565,
+    balancedAccuracy: 0.8828282990234944,
+    simulatedAccuracy: 0.9686048055,
     confusion: {
       rowLabels: ['smoking', 'no-smoking'],
       colLabels: ['alert', 'no alert'],
       counts: [
-        [840, 280],
-        [175, 22897],
+        [1564, 431],
+        [515, 27622],
       ],
     } satisfies ConfusionData,
     byClass: [
-      { className: 'smoke', alerts: 840, pairs: 1120 },
-      { className: 'eat', alerts: 0, pairs: 1120 },
-      { className: 'drink', alerts: 105, pairs: 1120 },
-      { className: 'sit', alerts: 0, pairs: 1120 },
-      { className: 'stand', alerts: 0, pairs: 1120 },
-      { className: 'random', alerts: 35, pairs: 1120 },
-      { className: 'static', alerts: 35, pairs: 1120 },
+      { className: 'smoke', alerts: 1564, pairs: 1995 },
+      { className: 'eat', alerts: 63, pairs: 1330 },
+      { className: 'drink', alerts: 182, pairs: 1330 },
+      { className: 'sit', alerts: 0, pairs: 1225 },
+      { className: 'stand', alerts: 0, pairs: 1225 },
+      { className: 'random', alerts: 235, pairs: 1330 },
+      { className: 'static', alerts: 35, pairs: 1330 },
     ],
   },
 };
@@ -433,7 +434,7 @@ export const METRIC_GROUPS: readonly MetricGroup[] = [
       {
         term: 'Support',
         definition:
-          'How many true examples of a class were in the test set. The CSI test set has 32 windows per class.',
+          'How many true examples of a class were in the test set. The CSI test set has 279 windows: 57 smoke and 35–38 for each other class.',
       },
       {
         term: 'Confusion matrix',
@@ -545,14 +546,14 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
     category: 'metrics',
     question: 'Why is there no single accuracy number?',
     answer:
-      'The three parts are evaluated on different data and units: CSI on 224 test windows, the sensor on 108 held-out intervals, and fusion on 24,192 artificial CSI × sensor pairs. Their percentages answer different questions and are not directly comparable.',
+      'The three parts are evaluated on different data and units: CSI on 279 test windows, the sensor on 108 held-out intervals, and fusion on 30,132 artificial CSI × sensor pairs. Their percentages answer different questions and are not directly comparable.',
   },
   {
     id: 'fusion-tpr-provenance',
     category: 'fusion',
-    question: 'Is the 75% fusion TPR real paired data?',
+    question: 'Is the 78% fusion TPR real paired data?',
     answer:
-      'No. No synchronized CSI + sensor test recording exists. The fusion evaluation pairs every CSI test window with every sensor test interval (224 × 108 = 24,192 artificial pairs). TPR, FPR, Youden J, and the per-class rates are the interpretable results. Precision, F1, and accuracy depend on the artificial 4.6% positive prevalence.',
+      'No. No synchronized CSI + sensor test recording exists. The fusion evaluation pairs every CSI test window with every sensor test interval (279 × 108 = 30,132 artificial pairs). TPR, FPR, Youden J, and the per-class rates are the interpretable results. Precision, F1, and accuracy depend on the artificial 6.6% positive prevalence.',
   },
   {
     id: 'product-alert-rate',
@@ -571,30 +572,30 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
   {
     id: 'binary-vs-seven-class',
     category: 'metrics',
-    question: 'Why is binary CSI 93.8% but 7-class CSI 86.2%?',
+    question: 'Why is binary CSI 91.4% but 7-class CSI 80.3%?',
     answer:
-      'They answer different questions. The binary view merges six non-smoke activities into one negative class, which is an easier task. Its 0.326 cut-off was chosen from the test score distribution, so it is descriptive and not a deployed, fully held-out gate.',
+      'They answer different questions. The binary view merges six non-smoke activities into one negative class, which is an easier task. Its 0.602 cut-off was chosen from the test score distribution, so it is descriptive and not a deployed, fully held-out gate.',
   },
   {
     id: 'unseen-session',
     category: 'limits',
-    question: 'Why does the unseen session score only 30.6%?',
+    question: 'Why does the unseen session score only 30.3%?',
     answer:
-      'That recording came from a new environment and was never used for training or tuning. The 7-class accuracy collapses, although smoke recall stays at 74% and the binary smoke AUC is 0.816. It is a domain-shift warning, not the headline in-domain result.',
+      'That recording came from a new environment and was never used for training or tuning. The 7-class accuracy collapses to 30.3%, and the binary smoke AUC falls to 0.728 (AP 0.240). Seven-class smoke recall stays high at 92% because the model over-predicts smoke there, but only 36% of smoke windows survive the deployed binary threshold. The archived smoke-6.0 checkpoint scored AP 0.441 on this session; the smoke-1.0 checkpoint is the active model by the chosen training configuration. Treat this as a domain-shift warning, not the headline in-domain result.',
   },
   {
     id: 'fusion-weights',
     category: 'fusion',
     question: 'Why 50/50 fusion weights?',
     answer:
-      'Equal weights require real CSI evidence before a fusion alert and limit sensor-only false alarms. A sweep toward sensor-heavy weights raises simulated TPR (0.781 at 0.3/0.7) but also raises FPR and lets the sensor carry weak CSI cases; 50/50 is a deliberate safety choice.',
+      'Equal weights require real CSI evidence before a fusion alert and limit sensor-only false alarms. A sweep toward sensor-heavy weights raises simulated TPR (0.807 at 0.3/0.7) but also raises FPR (0.021 vs 0.018) and lets the sensor carry weak CSI cases; 50/50 is a deliberate safety choice.',
   },
   {
     id: 'platt-calibration',
     category: 'metrics',
     question: 'Why use Platt calibration if raw accuracy is higher?',
     answer:
-      'The fused score needs comparable probabilities, and calibration improves probability quality (test Brier 0.213 → 0.199, log loss 0.451 → 0.443). It does not improve every metric: calibrated test accuracy drops slightly (86.2% → 85.7%), and ECE (0.045 → 0.064) is worse on test. Validation fitted the calibrator; test is diagnostics-only.',
+      'The fused score needs comparable probabilities, and calibration improves probability quality (test Brier 0.296 → 0.287, log loss 0.617 → 0.608). It does not improve every metric: calibrated test accuracy drops slightly (80.3% → 79.9%), and ECE (0.090 → 0.098) is worse on test. Validation fitted the calibrator; test is diagnostics-only.',
   },
   {
     id: 'static-snapshot',
@@ -644,9 +645,14 @@ export const PROVENANCE: readonly ProvenanceItem[] = [
       'Deployed fusion policy and the simulated cross-product evaluation (no paired CSI + sensor test set).',
   },
   {
+    source: 'models/csi_resnet_lstm_7class.meta.json',
+    path: 'smokeguard_application/models/csi_resnet_lstm_7class.meta.json',
+    detail: 'Active training run: smoke-1.0, best epoch 135, val macro-F1 0.8293, frozen split c348ee3c (2026-11-26).',
+  },
+  {
     source: 'models/csi_resnet_lstm_7class.platt.json',
     path: 'smokeguard_application/models/csi_resnet_lstm_7class.platt.json',
-    detail: 'CSI validation/test calibration diagnostics and class order (2026-10-30).',
+    detail: 'CSI validation/test calibration diagnostics and class order (2026-11-26; n_fit = 279).',
   },
   {
     source: 'models/smoke_svm.meta.json',

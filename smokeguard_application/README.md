@@ -80,7 +80,6 @@ injected into the containers wholesale, and the internal addresses
 | `INFLUXDB_ORG` / `INFLUXDB_BUCKET` | `smokeguard` / `csi_data` | InfluxDB organization/bucket |
 | `JWT_SECRET` / `PASSWORD_RESET_SECRET` | development values | Login token signing / password reset |
 | `TZ` | `Asia/Manila` | Local display, month grouping, and PDF timestamps (record times stay UTC epoch) |
-| `REPORT_FACILITY` | `DLSU-D PBH320` | Facility name printed in PDF reports |
 | `VITE_GITHUB_REPO` | `https://github.com/mayolito-waje/smokeguard` | Repository linked from Model Info source rows (build-time; rebuild the frontend after changing) |
 
 Notes:

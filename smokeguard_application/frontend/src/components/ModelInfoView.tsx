@@ -366,7 +366,7 @@ export default function ModelInfoView() {
             <MetricTile
               label="Test accuracy"
               value={pct(calibrated.summary.accuracy)}
-              sub="Calibrated · n = 224"
+              sub={`Calibrated · n = ${calibrated.summary.n}`}
             />
             <MetricTile
               label="Macro F1"
@@ -539,9 +539,13 @@ export default function ModelInfoView() {
             <div className="model-details-body">
               <p>
                 This recording came from a new environment and was never used
-                for training or tuning. The seven-class result collapses, while
-                smoke recall and the binary smoke score hold up better. Treat
-                this as a domain-shift warning, not the headline result.
+                for training or tuning. The seven-class result collapses to
+                about 30%; seven-class smoke recall stays high because the
+                model over-predicts smoke there, but the binary smoke view is
+                weak (AUC 0.728, AP 0.240). The archived smoke-6.0 checkpoint
+                scored higher on this session (AP 0.441), but the smoke-1.0
+                checkpoint is the active model by the chosen configuration.
+                Treat this as a domain-shift warning, not the headline result.
               </p>
               <dl className="model-facts">
                 <div className="model-fact">
@@ -763,8 +767,8 @@ export default function ModelInfoView() {
           <div className="model-table-scroll">
             <table className="model-table">
               <caption>
-                Class-conditional fusion alert rate · {int(fusion.positives)}{' '}
-                pairs per class
+                Class-conditional fusion alert rate · pairs = CSI windows × 35
+                smoke-state sensor intervals
               </caption>
               <thead>
                 <tr>
